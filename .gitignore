@@ -1,0 +1,116 @@
+# ==========================================
+# AutoQA Root .gitignore
+# ==========================================
+
+# ------------------------------------------
+# Environment & Sensitive Credentials
+# ------------------------------------------
+.env
+.env.local
+.env.*.local
+*.env
+!.env.example
+!*.env.example
+
+# ------------------------------------------
+# Dependencies
+# ------------------------------------------
+node_modules/
+*/node_modules/
+package-lock.json.bak
+
+# ------------------------------------------
+# Build Outputs & Compiled Files
+# ------------------------------------------
+# Frontend & Worker TypeScript/Vite builds
+dist/
+*/dist/
+build/
+*/build/
+.tsbuildinfo
+
+# Java / Maven build outputs
+target/
+*/target/
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+*.zip
+!demo-app.zip
+
+# Maven wrapper
+.mvn/wrapper/maven-wrapper.jar
+
+# ------------------------------------------
+# AutoQA Runtime Data & Artifacts
+# ------------------------------------------
+# Generated test screenshots, logs, uploaded zips, and workspaces
+data/artifacts/*
+data/uploads/*
+data/workspaces/*
+backend/data/
+worker/data/
+!data/artifacts/.gitkeep
+!data/uploads/.gitkeep
+!data/workspaces/.gitkeep
+
+# ------------------------------------------
+# Playwright & Testing Artifacts
+# ------------------------------------------
+test-results/
+*/test-results/
+playwright-report/
+*/playwright-report/
+blob-report/
+*/blob-report/
+playwright/.cache/
+*/playwright/.cache/
+
+# ------------------------------------------
+# Logs
+# ------------------------------------------
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ------------------------------------------
+# IDE & Editor Files
+# ------------------------------------------
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.sublime-workspace
+*.sublime-project
+
+# ------------------------------------------
+# Operating System Files
+# ------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ------------------------------------------
+# Temporary & Cache Files
+# ------------------------------------------
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.cache/
+.eslintcache
+.parcel-cache

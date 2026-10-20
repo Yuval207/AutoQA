@@ -1,0 +1,11 @@
+{
+  "name": "autoqa-demo-app",
+  "version": "1.0.0",
+  "description": "Demo fixture application with working and broken features for AutoQA testing",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {}
+}
