@@ -10,6 +10,8 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.nio.file.*;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -248,5 +250,226 @@ public class RepositoryAnalyzer {
             log.warn("Error building structure summary", e);
         }
         return structure;
+    }
+
+    /**
+     * Deeply analyzes codebase files to auto-generate project-specific feature specifications.
+     */
+    public String generateFeatureSpecFromCodebase(Path rootPath, String projectType) {
+        StringBuilder sb = new StringBuilder();
+        String projectName = rootPath.getFileName() != null ? rootPath.getFileName().toString() : "Application";
+
+        Path packageJson = rootPath.resolve("package.json");
+        if (Files.exists(packageJson)) {
+            try {
+                var tree = mapper.readTree(Files.readString(packageJson));
+                if (tree.has("name") && !tree.get("name").asText().isBlank()) {
+                    projectName = tree.get("name").asText();
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // 1. Detect backend routes (Express, etc.)
+        List<DetectedEndpoint> endpoints = detectBackendEndpoints(rootPath);
+
+        // 2. Detect frontend routes (React, HTML)
+        List<DetectedPageRoute> pages = detectFrontendPages(rootPath);
+
+        boolean hasContent = false;
+
+        if (!endpoints.isEmpty()) {
+            hasContent = true;
+            sb.append("# Feature: ").append(formatTitle(projectName)).append(" Endpoints\n\n");
+            for (DetectedEndpoint ep : endpoints) {
+                sb.append("## Scenario: ").append(ep.scenarioTitle).append("\n");
+                sb.append("- Open ").append(ep.path).append("\n");
+                if (ep.expectedText != null && !ep.expectedText.isBlank()) {
+                    sb.append("- Expected: ").append(ep.expectedText).append("\n");
+                } else {
+                    sb.append("- Expected: 200\n");
+                }
+                sb.append("\n");
+            }
+        }
+
+        if (!pages.isEmpty()) {
+            hasContent = true;
+            sb.append("# Feature: ").append(formatTitle(projectName)).append(" Views & Navigation\n\n");
+            for (DetectedPageRoute page : pages) {
+                sb.append("## Scenario: ").append(page.scenarioTitle).append("\n");
+                sb.append("- Open ").append(page.path).append("\n");
+                if (page.expectedText != null && !page.expectedText.isBlank()) {
+                    sb.append("- Expected: ").append(page.expectedText).append("\n");
+                }
+                sb.append("\n");
+            }
+        }
+
+        if (!hasContent) {
+            sb.append("# Feature: ").append(formatTitle(projectName)).append(" Availability\n\n");
+            sb.append("## Scenario: Root application health check\n");
+            sb.append("- Open /\n");
+            sb.append("- Expected: ").append(projectName).append("\n\n");
+            sb.append("## Scenario: Service health probe\n");
+            sb.append("- Open /health\n");
+            sb.append("- Expected: healthy\n\n");
+        }
+
+        return sb.toString();
+    }
+
+    private static class DetectedEndpoint {
+        String method;
+        String path;
+        String scenarioTitle;
+        String expectedText;
+
+        DetectedEndpoint(String method, String path, String scenarioTitle, String expectedText) {
+            this.method = method;
+            this.path = path;
+            this.scenarioTitle = scenarioTitle;
+            this.expectedText = expectedText;
+        }
+    }
+
+    private static class DetectedPageRoute {
+        String path;
+        String scenarioTitle;
+        String expectedText;
+
+        DetectedPageRoute(String path, String scenarioTitle, String expectedText) {
+            this.path = path;
+            this.scenarioTitle = scenarioTitle;
+            this.expectedText = expectedText;
+        }
+    }
+
+    private List<DetectedEndpoint> detectBackendEndpoints(Path root) {
+        List<DetectedEndpoint> list = new ArrayList<>();
+        Set<String> seenPaths = new HashSet<>();
+
+        Pattern routePattern = Pattern.compile(
+                "(?:app|router)\\.(get|post|put|delete|patch)\\s*\\(\\s*['\"]([^'\"]+)['\"]\\s*,\\s*(.*?)(?=(?:app|router)\\.(?:get|post|put|delete|patch)|app\\.listen|module\\.exports|export |$)",
+                Pattern.DOTALL
+        );
+        Pattern stringPattern = Pattern.compile("['\"]([^'\"]{2,60})['\"]");
+
+        try (Stream<Path> walk = Files.walk(root, 4)) {
+            walk.filter(p -> {
+                String s = p.toString();
+                return (s.endsWith(".js") || s.endsWith(".ts")) &&
+                        !s.contains("node_modules") && !s.contains(".git") && !s.contains("dist");
+            }).forEach(file -> {
+                try {
+                    String content = Files.readString(file);
+                    Matcher matcher = routePattern.matcher(content);
+                    while (matcher.find()) {
+                        String method = matcher.group(1).toUpperCase();
+                        String path = matcher.group(2).trim();
+                        String body = matcher.group(3);
+
+                        if (!path.startsWith("/")) path = "/" + path;
+                        if (seenPaths.contains(method + " " + path)) continue;
+                        seenPaths.add(method + " " + path);
+
+                        String expected = null;
+                        Matcher sm = stringPattern.matcher(body);
+                        while (sm.find()) {
+                            String candidate = sm.group(1).trim();
+                            if (!candidate.startsWith("/") &&
+                                    !candidate.equalsIgnoreCase("json") &&
+                                    !candidate.equalsIgnoreCase("send") &&
+                                    !candidate.equalsIgnoreCase("status") &&
+                                    !candidate.equalsIgnoreCase("error") &&
+                                    !candidate.equalsIgnoreCase("application/json") &&
+                                    !candidate.matches("^[0-9]+$")) {
+                                expected = candidate;
+                                break;
+                            }
+                        }
+
+                        if (expected == null || expected.isBlank()) {
+                            expected = path.equals("/") ? "200" : path.replaceFirst("^/", "");
+                        }
+
+                        String title = "Verify " + method + " " + path + " endpoint";
+                        list.add(new DetectedEndpoint(method, path, title, expected));
+                    }
+                } catch (Exception ignored) {}
+            });
+        } catch (Exception e) {
+            log.warn("Error detecting backend endpoints", e);
+        }
+
+        return list;
+    }
+
+    private List<DetectedPageRoute> detectFrontendPages(Path root) {
+        List<DetectedPageRoute> list = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+
+        Pattern reactRoutePattern = Pattern.compile("<Route\\s+[^>]*path=['\"]([^'\"]+)['\"]");
+        Pattern titlePattern = Pattern.compile("<title>(.*?)</title>", Pattern.CASE_INSENSITIVE);
+        Pattern h1Pattern = Pattern.compile("<h1[^>]*>(.*?)</h1>", Pattern.CASE_INSENSITIVE);
+
+        // Check index.html
+        Path indexHtml = root.resolve("index.html");
+        if (!Files.exists(indexHtml)) {
+            indexHtml = root.resolve("public/index.html");
+        }
+        if (Files.exists(indexHtml)) {
+            try {
+                String content = Files.readString(indexHtml);
+                String expected = null;
+                Matcher tm = titlePattern.matcher(content);
+                if (tm.find()) expected = tm.group(1).trim();
+                if (expected == null) {
+                    Matcher hm = h1Pattern.matcher(content);
+                    if (hm.find()) expected = hm.group(1).replaceAll("<[^>]+>", "").trim();
+                }
+                seen.add("/");
+                list.add(new DetectedPageRoute("/", "Verify application homepage", expected != null ? expected : "Home"));
+            } catch (Exception ignored) {}
+        }
+
+        // Scan React components for Route definitions
+        try (Stream<Path> walk = Files.walk(root, 4)) {
+            walk.filter(p -> {
+                String s = p.toString();
+                return (s.endsWith(".tsx") || s.endsWith(".jsx")) &&
+                        !s.contains("node_modules") && !s.contains(".git") && !s.contains("dist");
+            }).forEach(file -> {
+                try {
+                    String content = Files.readString(file);
+                    Matcher rm = reactRoutePattern.matcher(content);
+                    while (rm.find()) {
+                        String path = rm.group(1).trim();
+                        if (!path.startsWith("/")) path = "/" + path;
+                        if (path.contains("*") || seen.contains(path)) continue;
+                        seen.add(path);
+                        String pageName = path.equals("/") ? "Home" : path.substring(1).replace("/", " ");
+                        list.add(new DetectedPageRoute(path, "Navigate to " + pageName + " page", pageName));
+                    }
+                } catch (Exception ignored) {}
+            });
+        } catch (Exception e) {
+            log.warn("Error detecting frontend pages", e);
+        }
+
+        return list;
+    }
+
+    private String formatTitle(String name) {
+        if (name == null || name.isBlank()) return "Application";
+        String cleaned = name.replaceAll("[-_]", " ").trim();
+        StringBuilder res = new StringBuilder();
+        for (String word : cleaned.split("\\s+")) {
+            if (!word.isEmpty()) {
+                res.append(Character.toUpperCase(word.charAt(0)))
+                        .append(word.substring(1).toLowerCase())
+                        .append(" ");
+            }
+        }
+        return res.toString().trim();
     }
 }

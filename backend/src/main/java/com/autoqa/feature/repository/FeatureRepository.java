@@ -8,4 +8,5 @@ import java.util.UUID;
 public interface FeatureRepository extends JpaRepository<Feature, UUID> {
     List<Feature> findByProjectIdOrderByCreatedAt(UUID projectId);
     List<Feature> findBySpecificationId(UUID specificationId);
+    void deleteByProjectId(UUID projectId);
 }

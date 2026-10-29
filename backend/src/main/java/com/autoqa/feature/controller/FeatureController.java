@@ -146,6 +146,33 @@ public class FeatureController {
         return ResponseEntity.ok(result);
     }
 
+    @PostMapping("/generate-scenarios")
+    public ResponseEntity<List<Map<String, Object>>> generateScenarios(
+            @PathVariable UUID projectId,
+            @AuthenticationPrincipal User user) {
+        projectService.verifyOwnership(projectId, user.getId());
+        List<TestScenario> scenarios = projectService.generateScenariosFromCodebase(projectId, user.getId());
+        List<Map<String, Object>> result = scenarios.stream().map(s -> {
+            Map<String, Object> sm = new LinkedHashMap<>();
+            sm.put("id", s.getId());
+            sm.put("featureId", s.getFeature() != null ? s.getFeature().getId() : null);
+            sm.put("featureName", s.getFeature() != null ? s.getFeature().getName() : "");
+            sm.put("name", s.getName());
+            sm.put("description", s.getDescription());
+            sm.put("scenarioType", s.getScenarioType());
+            sm.put("priority", s.getPriority());
+            sm.put("status", s.getStatus());
+            sm.put("confidence", s.getConfidence());
+            sm.put("source", s.getSource());
+            sm.put("actions", s.getActions());
+            sm.put("expectedOutcomes", s.getExpectedOutcomes());
+            sm.put("preconditions", s.getPreconditions());
+            sm.put("createdAt", s.getCreatedAt());
+            return sm;
+        }).collect(Collectors.toList());
+        return ResponseEntity.ok(result);
+    }
+
     @GetMapping("/specifications")
     public ResponseEntity<List<Map<String, Object>>> getSpecifications(
             @PathVariable UUID projectId,

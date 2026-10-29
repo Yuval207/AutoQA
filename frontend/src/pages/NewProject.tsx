@@ -65,10 +65,11 @@ export const NewProject: React.FC = () => {
     try {
       const updated = await api.uploadRepository(createdProject.id, selectedFile);
       setCreatedProject(updated);
-      setInstallCommand(updated.installCommand || '');
-      setStartupCommand(updated.startupCommand || 'node server.js');
-      setPort(updated.port || 3000);
-      setHealthCheckPath(updated.healthCheckPath || '/health');
+      const env = (updated as any).environment;
+      setInstallCommand(env?.installCommand || updated.installCommand || 'npm install');
+      setStartupCommand(env?.startupCommand || updated.startupCommand || 'npm start');
+      setPort(env?.port || updated.port || 3000);
+      setHealthCheckPath(env?.healthCheckPath || updated.healthCheckPath || '/health');
       setStep(3);
     } catch (err: any) {
       setError(err.message || 'Failed to upload and analyze repository archive');
@@ -135,52 +136,6 @@ export const NewProject: React.FC = () => {
         healthCheckPath: healthCheckPath.trim() || '/',
         startupTimeoutSeconds: Number(startupTimeout) || 60,
       });
-
-      // Also seed a default feature spec if none exists
-      const defaultFeatures = `# Feature: User Authentication
-
-## Scenario: Successful login
-- Open /
-- Enter testuser into username
-- Enter password123 into password
-- Click Log in
-- Expected: Welcome, testuser
-
-## Scenario: Invalid credentials error
-- Open /
-- Enter wronguser into username
-- Enter wrongpass into password
-- Click Log in
-- Expected: Invalid credentials
-
-# Feature: Task Management
-
-## Scenario: Add a new task
-- Open /
-- Enter Review pull request into task-input
-- Click Add Task
-- Expected: Review pull request
-
-## Scenario: Toggle task completion
-- Open /
-- Click Complete
-- Expected: Completed
-
-# Feature: Discount Coupon System
-
-## Scenario: Apply valid discount coupon
-- Open /
-- Enter SAVE20 into coupon-input
-- Click Apply Coupon
-- Expected: 20% discount applied!
-
-## Scenario: Apply promotional discount code
-- Open /
-- Enter BUG50 into coupon-input
-- Click Apply Coupon
-- Expected: 50% promotional discount applied!
-`;
-      await api.uploadSpecification(createdProject.id, defaultFeatures, 'features.md').catch(() => {});
 
       navigate(`/projects/${createdProject.id}`);
     } catch (err: any) {

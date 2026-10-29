@@ -15,4 +15,5 @@ public interface TestScenarioRepository extends JpaRepository<TestScenario, UUID
 
     List<TestScenario> findByFeatureIdOrderByCreatedAt(UUID featureId);
     long countByProjectId(UUID projectId);
+    void deleteByProjectId(UUID projectId);
 }

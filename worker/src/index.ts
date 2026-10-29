@@ -97,7 +97,33 @@ function startApplication(
 ): { process: ChildProcess; getLog: () => string } {
   let logBuffer = '';
 
-  const child = spawn(startupCommand, {
+  let effectiveCommand = startupCommand;
+  const nodeMatch = startupCommand.match(/^node\s+([^\s]+)/);
+  if (nodeMatch) {
+    const targetFile = nodeMatch[1];
+    const targetPath = path.resolve(cwd, targetFile);
+    if (!fs.existsSync(targetPath)) {
+      const pkgPath = path.resolve(cwd, 'package.json');
+      if (fs.existsSync(pkgPath)) {
+        try {
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+          if (pkg.scripts && pkg.scripts.start) {
+            console.log(`[Worker] '${targetFile}' not found at root, using 'npm start' from package.json`);
+            effectiveCommand = 'npm start';
+          } else if (pkg.main && fs.existsSync(path.resolve(cwd, pkg.main))) {
+            console.log(`[Worker] '${targetFile}' not found, using main entrypoint 'node ${pkg.main}'`);
+            effectiveCommand = `node ${pkg.main}`;
+          }
+        } catch {}
+      }
+      if (effectiveCommand === startupCommand && fs.existsSync(path.resolve(cwd, 'src', targetFile))) {
+        console.log(`[Worker] '${targetFile}' found in src/, using 'node src/${targetFile}'`);
+        effectiveCommand = `node src/${targetFile}`;
+      }
+    }
+  }
+
+  const child = spawn(effectiveCommand, {
     cwd,
     shell: true,
     env: {
@@ -215,11 +241,17 @@ async function processJob(job: WorkerJob): Promise<void> {
       return;
     }
 
-    // 1. Install dependencies if installCommand is provided
-    if (job.installCommand) {
-      console.log(`[Worker] Running install command: ${job.installCommand}`);
+    // 1. Install dependencies if installCommand is provided, or auto-install if package.json exists without node_modules
+    let installCmd = job.installCommand;
+    if (!installCmd && fs.existsSync(path.resolve(workDir, 'package.json')) && !fs.existsSync(path.resolve(workDir, 'node_modules'))) {
+      console.log(`[Worker] node_modules missing for package.json, auto-running 'npm install'...`);
+      installCmd = 'npm install';
+    }
+
+    if (installCmd) {
+      console.log(`[Worker] Running install command: ${installCmd}`);
       await updateRunStatus(job.runId, 'STARTING_ENVIRONMENT', undefined, 'Installing dependencies...');
-      const installResult = await runCommand(job.installCommand, workDir);
+      const installResult = await runCommand(installCmd, workDir);
       if (!installResult.success) {
         console.error(`[Worker] Install command failed:\n${installResult.output}`);
         await updateRunStatus(

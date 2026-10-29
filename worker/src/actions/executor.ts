@@ -19,13 +19,16 @@ export class ActionExecutor {
 
     // Capture console errors
     this.page.on('console', (msg: ConsoleMessage) => {
+      const text = msg.text();
+      if (text.includes('favicon.ico')) return;
       if (msg.type() === 'error' || msg.type() === 'warning') {
-        this.consoleLogs.push(`[${msg.type()}] ${msg.text()}`);
+        this.consoleLogs.push(`[${msg.type()}] ${text}`);
       }
     });
 
-    // Capture failed network requests
+    // Capture failed network requests (ignore favicon.ico 404)
     this.page.on('response', (response) => {
+      if (response.url().includes('favicon.ico')) return;
       if (response.status() >= 400) {
         this.networkErrors.push({
           url: response.url(),
@@ -108,8 +111,26 @@ export class ActionExecutor {
         }
 
         case 'ASSERT_TEXT': {
-          const textToFind = action.target || action.value || '';
-          const isVisible = await this.page.getByText(textToFind, { exact: false }).first().isVisible({ timeout: 10000 }).catch(() => false);
+          const textToFind = (action.target || action.value || '').trim();
+          let isVisible = false;
+          try {
+            isVisible = await this.page.getByText(textToFind, { exact: false }).first().isVisible({ timeout: 2000 }).catch(() => false);
+          } catch {}
+
+          if (!isVisible) {
+            const bodyText = await this.page.innerText('body').catch(() => '');
+            if (bodyText.toLowerCase().includes(textToFind.toLowerCase())) {
+              isVisible = true;
+            }
+          }
+
+          if (!isVisible) {
+            const content = await this.page.content().catch(() => '');
+            if (content.toLowerCase().includes(textToFind.toLowerCase())) {
+              isVisible = true;
+            }
+          }
+
           if (!isVisible) {
             await this.captureScreenshot(screenshotPath);
             return this.failStep(stepIndex, action, startTime, screenshotName,
@@ -282,8 +303,25 @@ export class ActionExecutor {
       const isDirectlyVisible = await this.page
         .getByText(trimmed, { exact: false })
         .first()
-        .isVisible({ timeout: 2000 });
+        .isVisible({ timeout: 2000 })
+        .catch(() => false);
       if (isDirectlyVisible) {
+        return true;
+      }
+    } catch {}
+
+    // Check innerText of body (handles JSON responses and preformatted text)
+    try {
+      const bodyText = await this.page.innerText('body').catch(() => '');
+      if (bodyText.toLowerCase().includes(lower)) {
+        return true;
+      }
+    } catch {}
+
+    // Check raw page HTML content
+    try {
+      const content = await this.page.content().catch(() => '');
+      if (content.toLowerCase().includes(lower)) {
         return true;
       }
     } catch {}
@@ -347,10 +385,12 @@ export class ActionExecutor {
       .replace(/\s+/g, '')
       .toLowerCase();
 
-    if (cleaned === '/' || cleaned === 'home' || cleaned === 'homepage') {
-      return this.baseUrl;
+    const baseClean = this.baseUrl.replace(/\/+$/, '');
+    if (cleaned === '/' || cleaned === 'home' || cleaned === 'homepage' || cleaned === '') {
+      return baseClean;
     }
-    return `${this.baseUrl}/${cleaned}`;
+    const pathPart = cleaned.startsWith('/') ? cleaned : `/${cleaned}`;
+    return `${baseClean}${pathPart}`;
   }
 
   private resolveLocator(target: string) {

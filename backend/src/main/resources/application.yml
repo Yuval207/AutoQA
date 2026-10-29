@@ -1,11 +1,12 @@
 server:
   port: ${PORT:8081}
-  servlet:
-    multipart:
-      max-file-size: ${MAX_UPLOAD_SIZE_MB:100}MB
-      max-request-size: ${MAX_UPLOAD_SIZE_MB:100}MB
 
 spring:
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: ${MAX_UPLOAD_SIZE_MB:200}MB
+      max-request-size: ${MAX_UPLOAD_SIZE_MB:200}MB
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://ep-nameless-breeze-b5em49z5-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require}
     username: ${SPRING_DATASOURCE_USERNAME:neondb_owner}

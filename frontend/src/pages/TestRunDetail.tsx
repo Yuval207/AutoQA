@@ -184,6 +184,18 @@ export const TestRunDetail: React.FC = () => {
           </div>
         </div>
 
+        {run.status === 'QUEUED' && (
+          <div className="mt-4 p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs flex items-center gap-2.5">
+            <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+            <span>
+              Job is waiting in queue. Start the Worker engine in a terminal tab:{" "}
+              <code className="bg-slate-950 px-2 py-1 rounded font-mono text-cyan-300 border border-slate-800">
+                cd worker && npm run dev
+              </code>
+            </span>
+          </div>
+        )}
+
         {/* Target App Connection */}
         {run.appUrl && (
           <div className="mt-6 pt-5 border-t border-slate-800/80 flex items-center justify-between text-xs font-mono">

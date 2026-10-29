@@ -4,10 +4,14 @@ import com.autoqa.auth.entity.User;
 import com.autoqa.common.exception.BadRequestException;
 import com.autoqa.common.exception.ForbiddenException;
 import com.autoqa.common.exception.ResourceNotFoundException;
+import com.autoqa.feature.repository.FeatureRepository;
+import com.autoqa.feature.repository.FeatureSpecificationRepository;
+import com.autoqa.feature.service.FeatureParserService;
 import com.autoqa.project.dto.*;
 import com.autoqa.project.entity.*;
 import com.autoqa.project.repository.*;
 import com.autoqa.repository.service.RepositoryAnalyzer;
+import com.autoqa.testplan.repository.TestScenarioRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -16,11 +20,13 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.*;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+import java.util.zip.ZipFile;
 
 @Service
 public class ProjectService {
@@ -29,7 +35,8 @@ public class ProjectService {
 
     private static final Set<String> EXCLUDED_DIRS = Set.of(
             "node_modules", ".git", "dist", "build", ".next", "__pycache__",
-            ".gradle", "target", ".idea", ".vscode", "coverage", ".nyc_output"
+            ".gradle", "target", ".idea", ".vscode", "coverage", ".nyc_output",
+            "__MACOSX"
     );
 
     private static final long MAX_ENTRIES = 10000;
@@ -39,6 +46,10 @@ public class ProjectService {
     private final RepositorySourceRepository repoSourceRepository;
     private final EnvironmentConfigRepository envConfigRepository;
     private final RepositoryAnalyzer repositoryAnalyzer;
+    private final FeatureParserService featureParserService;
+    private final TestScenarioRepository scenarioRepository;
+    private final FeatureRepository featureRepository;
+    private final FeatureSpecificationRepository specRepository;
 
     @Value("${autoqa.storage.uploads-path}")
     private String uploadsPath;
@@ -49,11 +60,19 @@ public class ProjectService {
     public ProjectService(ProjectRepository projectRepository,
                           RepositorySourceRepository repoSourceRepository,
                           EnvironmentConfigRepository envConfigRepository,
-                          RepositoryAnalyzer repositoryAnalyzer) {
+                          RepositoryAnalyzer repositoryAnalyzer,
+                          FeatureParserService featureParserService,
+                          TestScenarioRepository scenarioRepository,
+                          FeatureRepository featureRepository,
+                          FeatureSpecificationRepository specRepository) {
         this.projectRepository = projectRepository;
         this.repoSourceRepository = repoSourceRepository;
         this.envConfigRepository = envConfigRepository;
         this.repositoryAnalyzer = repositoryAnalyzer;
+        this.featureParserService = featureParserService;
+        this.scenarioRepository = scenarioRepository;
+        this.featureRepository = featureRepository;
+        this.specRepository = specRepository;
     }
 
     @Transactional
@@ -150,6 +169,9 @@ public class ProjectService {
             project.setProjectType(projectType);
             projectRepository.save(project);
 
+            // Auto-detect or generate project-specific test scenarios
+            processTestScenarios(project, userId, effectiveRoot, projectType);
+
         } catch (Exception e) {
             log.error("Repository analysis failed for project {}", projectId, e);
             repoSource.setStatus("ANALYSIS_FAILED");
@@ -159,6 +181,81 @@ public class ProjectService {
         repoSource = repoSourceRepository.save(repoSource);
         var env = envConfigRepository.findByProjectId(projectId).orElse(null);
         return toResponse(project, repoSource, env);
+    }
+
+    @Transactional
+    public List<com.autoqa.testplan.entity.TestScenario> generateScenariosFromCodebase(UUID projectId, UUID userId) {
+        Project project = getProjectEntity(projectId, userId);
+        RepositorySource repoSource = repoSourceRepository.findFirstByProjectIdOrderByCreatedAtDesc(projectId)
+                .orElseThrow(() -> new BadRequestException("No repository uploaded for project: " + projectId));
+
+        Path rootPath = Paths.get(repoSource.getExtractedPath());
+        if (!Files.exists(rootPath)) {
+            throw new BadRequestException("Extracted repository path not found: " + rootPath);
+        }
+
+        String projectType = project.getProjectType() != null ? project.getProjectType() : repositoryAnalyzer.detectProjectType(rootPath);
+        processTestScenarios(project, userId, rootPath, projectType);
+        return scenarioRepository.findByProjectIdOrderByCreatedAt(projectId);
+    }
+
+    private void processTestScenarios(Project project, UUID userId, Path effectiveRoot, String projectType) {
+        try {
+            // Clean up previous scenarios/features for clean regeneration
+            scenarioRepository.deleteByProjectId(project.getId());
+            featureRepository.deleteByProjectId(project.getId());
+            specRepository.deleteByProjectId(project.getId());
+
+            Optional<Path> featuresFile = findFeaturesFile(effectiveRoot);
+            if (featuresFile.isPresent()) {
+                Path file = featuresFile.get();
+                log.info("Found existing feature specification file: {}", file);
+                String content = Files.readString(file);
+                featureParserService.parseAndStore(project.getId(), userId, content, file.getFileName().toString());
+            } else {
+                log.info("No feature file in repository. Analyzing codebase to auto-generate scenarios for project {}", project.getId());
+                String generatedSpec = repositoryAnalyzer.generateFeatureSpecFromCodebase(effectiveRoot, projectType);
+                featureParserService.parseAndStore(project.getId(), userId, generatedSpec, "auto-detected-features.md");
+            }
+        } catch (Exception e) {
+            log.error("Failed to process test scenarios for project {}", project.getId(), e);
+        }
+    }
+
+    private Optional<Path> findFeaturesFile(Path rootPath) {
+        List<String> candidateNames = List.of(
+                "features.md", "feature.md", "specs.md", "spec.md",
+                "test-plan.md", "tests.md", "specifications.md"
+        );
+        for (String name : candidateNames) {
+            Path p = rootPath.resolve(name);
+            if (Files.exists(p) && Files.isRegularFile(p)) {
+                return Optional.of(p);
+            }
+        }
+
+        for (String sub : List.of("docs", "specs", "tests", ".autoqa")) {
+            Path subDir = rootPath.resolve(sub);
+            if (Files.isDirectory(subDir)) {
+                for (String name : candidateNames) {
+                    Path p = subDir.resolve(name);
+                    if (Files.exists(p) && Files.isRegularFile(p)) {
+                        return Optional.of(p);
+                    }
+                }
+            }
+        }
+
+        try (var stream = Files.walk(rootPath, 3)) {
+            var featureFile = stream
+                    .filter(p -> p.toString().endsWith(".feature") && !p.toString().contains("node_modules"))
+                    .findFirst();
+            if (featureFile.isPresent()) {
+                return featureFile;
+            }
+        } catch (IOException ignored) {}
+
+        return Optional.empty();
     }
 
     @Transactional
@@ -190,9 +287,10 @@ public class ProjectService {
         long entryCount = 0;
         Path destDirAbsolute = destDir.toAbsolutePath().normalize();
 
-        try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zipPath))) {
-            ZipEntry entry;
-            while ((entry = zis.getNextEntry()) != null) {
+        try (ZipFile zipFile = new ZipFile(zipPath.toFile())) {
+            Enumeration<? extends ZipEntry> entries = zipFile.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
                 entryCount++;
                 if (entryCount > MAX_ENTRIES) {
                     throw new BadRequestException("Archive contains too many entries (max " + MAX_ENTRIES + ")");
@@ -214,7 +312,9 @@ public class ProjectService {
                 if (entry.isDirectory()) {
                     Files.createDirectories(resolved);
                 } else {
-                    Files.createDirectories(resolved.getParent());
+                    if (resolved.getParent() != null) {
+                        Files.createDirectories(resolved.getParent());
+                    }
 
                     // Size limit check
                     totalSize += entry.getSize() >= 0 ? entry.getSize() : 0;
@@ -225,9 +325,10 @@ public class ProjectService {
                     // Write with size tracking
                     long written = 0;
                     byte[] buffer = new byte[8192];
-                    try (var out = Files.newOutputStream(resolved)) {
+                    try (InputStream is = zipFile.getInputStream(entry);
+                         OutputStream out = Files.newOutputStream(resolved)) {
                         int len;
-                        while ((len = zis.read(buffer)) > 0) {
+                        while ((len = is.read(buffer)) > 0) {
                             written += len;
                             if (written > MAX_TOTAL_SIZE) {
                                 throw new BadRequestException("Extracted archive exceeds maximum size limit");
@@ -237,8 +338,6 @@ public class ProjectService {
                     }
                     totalSize += written;
                 }
-
-                zis.closeEntry();
             }
         }
     }
@@ -255,7 +354,9 @@ public class ProjectService {
 
     private Path findEffectiveRoot(Path extractDir) throws IOException {
         try (var stream = Files.list(extractDir)) {
-            List<Path> children = stream.toList();
+            List<Path> children = stream
+                    .filter(p -> !p.getFileName().toString().equals("__MACOSX") && !p.getFileName().toString().startsWith("."))
+                    .toList();
             if (children.size() == 1 && Files.isDirectory(children.get(0))) {
                 return children.get(0);
             }
@@ -271,24 +372,60 @@ public class ProjectService {
                     return c;
                 });
 
-        // Parse analysis to set defaults
-        if (analysis.contains("\"packageManager\":\"npm\"")) {
-            config.setInstallCommand("npm install");
-        } else if (analysis.contains("\"packageManager\":\"yarn\"")) {
-            config.setInstallCommand("yarn install");
-        } else if (analysis.contains("\"packageManager\":\"pnpm\"")) {
-            config.setInstallCommand("pnpm install");
+        // Parse package.json directly if present for exact commands
+        Path packageJson = rootPath.resolve("package.json");
+        if (Files.exists(packageJson)) {
+            try {
+                com.fasterxml.jackson.databind.JsonNode tree = new com.fasterxml.jackson.databind.ObjectMapper().readTree(Files.readString(packageJson));
+                config.setInstallCommand("npm install");
+
+                if (tree.has("scripts") && tree.get("scripts").has("start")) {
+                    config.setStartupCommand("npm start");
+                } else if (tree.has("main") && !tree.get("main").asText().isBlank()) {
+                    config.setStartupCommand("node " + tree.get("main").asText());
+                } else if (Files.exists(rootPath.resolve("src/index.js"))) {
+                    config.setStartupCommand("node src/index.js");
+                } else if (Files.exists(rootPath.resolve("index.js"))) {
+                    config.setStartupCommand("node index.js");
+                } else if (Files.exists(rootPath.resolve("server.js"))) {
+                    config.setStartupCommand("node server.js");
+                }
+            } catch (Exception ignored) {}
         }
 
+        // Framework specific overrides
         if (analysis.contains("\"framework\":\"vite\"") || analysis.contains("\"framework\":\"react-vite\"")) {
             config.setStartupCommand("npm run dev -- --host 0.0.0.0");
             config.setPort(5173);
-        } else if (analysis.contains("\"framework\":\"create-react-app\"")) {
-            config.setStartupCommand("npm start");
+        } else if (config.getStartupCommand() == null) {
+            if (Files.exists(rootPath.resolve("src/index.js"))) {
+                config.setStartupCommand("node src/index.js");
+            } else if (Files.exists(rootPath.resolve("index.js"))) {
+                config.setStartupCommand("node index.js");
+            } else {
+                config.setStartupCommand("node server.js");
+            }
+        }
+
+        if (config.getPort() == null) {
             config.setPort(3000);
-        } else if (analysis.contains("\"startScript\"")) {
-            config.setStartupCommand("npm start");
-            config.setPort(3000);
+        }
+
+        // Health check path: if codebase has /health, use /health, otherwise /
+        if (Files.exists(rootPath.resolve("src/index.js")) || Files.exists(rootPath.resolve("index.js")) || Files.exists(rootPath.resolve("server.js"))) {
+            try {
+                String code = Files.exists(rootPath.resolve("src/index.js")) ? Files.readString(rootPath.resolve("src/index.js")) :
+                              (Files.exists(rootPath.resolve("index.js")) ? Files.readString(rootPath.resolve("index.js")) : Files.readString(rootPath.resolve("server.js")));
+                if (code.contains("/health")) {
+                    config.setHealthCheckPath("/health");
+                } else {
+                    config.setHealthCheckPath("/");
+                }
+            } catch (Exception ignored) {
+                config.setHealthCheckPath("/health");
+            }
+        } else {
+            config.setHealthCheckPath("/health");
         }
 
         config.setWorkingDirectory(null);

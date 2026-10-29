@@ -1,12 +1,13 @@
 package com.autoqa.feature.service;
 
 import com.autoqa.common.exception.BadRequestException;
+import com.autoqa.common.exception.ResourceNotFoundException;
 import com.autoqa.feature.entity.Feature;
 import com.autoqa.feature.entity.FeatureSpecification;
 import com.autoqa.feature.repository.FeatureRepository;
 import com.autoqa.feature.repository.FeatureSpecificationRepository;
 import com.autoqa.project.entity.Project;
-import com.autoqa.project.service.ProjectService;
+import com.autoqa.project.repository.ProjectRepository;
 import com.autoqa.testplan.entity.TestScenario;
 import com.autoqa.testplan.repository.TestScenarioRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -32,21 +33,22 @@ public class FeatureParserService {
     private final FeatureSpecificationRepository specRepository;
     private final FeatureRepository featureRepository;
     private final TestScenarioRepository scenarioRepository;
-    private final ProjectService projectService;
+    private final ProjectRepository projectRepository;
 
     public FeatureParserService(FeatureSpecificationRepository specRepository,
                                 FeatureRepository featureRepository,
                                 TestScenarioRepository scenarioRepository,
-                                ProjectService projectService) {
+                                ProjectRepository projectRepository) {
         this.specRepository = specRepository;
         this.featureRepository = featureRepository;
         this.scenarioRepository = scenarioRepository;
-        this.projectService = projectService;
+        this.projectRepository = projectRepository;
     }
 
     @Transactional
     public FeatureSpecification parseAndStore(UUID projectId, UUID userId, String content, String filename) {
-        Project project = projectService.getProjectEntity(projectId, userId);
+        Project project = projectRepository.findByIdAndUserId(projectId, userId)
+                .orElseThrow(() -> new ResourceNotFoundException("Project not found: " + projectId));
 
         if (content == null || content.trim().isEmpty()) {
             throw new BadRequestException("Feature specification content is empty");

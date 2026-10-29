@@ -171,6 +171,12 @@ export async function getScenarios(projectId: string): Promise<TestScenario[]> {
   return await apiFetch<TestScenario[]>(`/api/projects/${projectId}/scenarios`);
 }
 
+export async function generateScenarios(projectId: string): Promise<TestScenario[]> {
+  return await apiFetch<TestScenario[]>(`/api/projects/${projectId}/generate-scenarios`, {
+    method: 'POST',
+  });
+}
+
 export async function approveScenario(projectId: string, scenarioId: string): Promise<void> {
   await apiFetch<void>(`/api/projects/${projectId}/scenarios/${scenarioId}/approve`, {
     method: 'PUT',

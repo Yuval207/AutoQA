@@ -36,6 +36,7 @@ export const ProjectDetail: React.FC = () => {
 
   const [loading, setLoading] = useState(true);
   const [triggeringRun, setTriggeringRun] = useState(false);
+  const [generatingScenarios, setGeneratingScenarios] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Markdown upload/paste modal
@@ -87,6 +88,22 @@ export const ProjectDetail: React.FC = () => {
       setScenarios((prev) => prev.map((s) => ({ ...s, status: 'APPROVED' })));
     } catch (err: any) {
       alert(`Approve all failed: ${err.message}`);
+    }
+  };
+
+  const handleAutoDetectScenarios = async () => {
+    if (!projectId) return;
+    setGeneratingScenarios(true);
+    setError(null);
+    try {
+      const generated = await api.generateScenarios(projectId);
+      setScenarios(generated);
+      const updatedSpecs = await api.getSpecifications(projectId).catch(() => []);
+      setSpecs(updatedSpecs);
+    } catch (err: any) {
+      setError(err.message || 'Failed to auto-detect scenarios from codebase');
+    } finally {
+      setGeneratingScenarios(false);
     }
   };
 
@@ -314,15 +331,26 @@ export const ProjectDetail: React.FC = () => {
                 Parsed from feature markdown with typed Playwright actions and explicit DOM assertions
               </p>
             </div>
-            {scenarios.length > 0 && (
+            <div className="flex items-center gap-2">
               <button
-                onClick={handleApproveAll}
-                className="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold px-3 py-1.5 rounded-lg border border-slate-700 flex items-center gap-1.5 transition-colors"
+                onClick={handleAutoDetectScenarios}
+                disabled={generatingScenarios}
+                className="bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 text-xs font-semibold px-3 py-1.5 rounded-lg border border-indigo-500/30 flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                title="Scan codebase to re-detect project endpoints and generate fresh test scenarios"
               >
-                <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Approve All Scenarios</span>
+                <Sparkles className={`w-3.5 h-3.5 ${generatingScenarios ? 'animate-spin' : ''}`} />
+                <span>{generatingScenarios ? 'Analyzing Code...' : 'Auto-Detect from Codebase'}</span>
               </button>
-            )}
+              {scenarios.length > 0 && (
+                <button
+                  onClick={handleApproveAll}
+                  className="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold px-3 py-1.5 rounded-lg border border-slate-700 flex items-center gap-1.5 transition-colors"
+                >
+                  <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Approve All Scenarios</span>
+                </button>
+              )}
+            </div>
           </div>
 
           {scenarios.length === 0 ? (
@@ -330,15 +358,25 @@ export const ProjectDetail: React.FC = () => {
               <FileText className="w-10 h-10 text-slate-600 mx-auto mb-3" />
               <h3 className="text-base font-bold text-white">No Test Scenarios Yet</h3>
               <p className="text-slate-400 text-xs max-w-md mx-auto mt-1 mb-4">
-                Upload or paste a feature specification (Markdown) to automatically extract test scenarios and generate actionable test steps.
+                Auto-detect test scenarios directly from your codebase or upload a custom feature specification markdown.
               </p>
-              <button
-                onClick={() => setActiveTab('specs')}
-                className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs px-4 py-2 rounded-xl transition-all"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Add Feature Specification</span>
-              </button>
+              <div className="flex items-center justify-center gap-3">
+                <button
+                  onClick={handleAutoDetectScenarios}
+                  disabled={generatingScenarios}
+                  className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs px-4 py-2 rounded-xl transition-all disabled:opacity-50"
+                >
+                  <Sparkles className={`w-3.5 h-3.5 ${generatingScenarios ? 'animate-spin' : ''}`} />
+                  <span>{generatingScenarios ? 'Analyzing Code...' : 'Auto-Detect from Codebase'}</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab('specs')}
+                  className="inline-flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs px-4 py-2 rounded-xl transition-all"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add Feature Specification</span>
+                </button>
+              </div>
             </div>
           ) : (
             <div className="space-y-4">
