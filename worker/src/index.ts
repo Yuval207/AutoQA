@@ -3,6 +3,10 @@ import { spawn, ChildProcess } from 'child_process';
 import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 import {
   pollForJob,
   updateRunStatus,
@@ -13,6 +17,44 @@ import {
 } from './api-client.js';
 import { WorkerJob, TestCase, TestAction, StepResult, ExecutionResult, BugFinding } from './types.js';
 import { ActionExecutor } from './actions/executor.js';
+
+// Setup file logging to logs/worker.log
+const logsDir = [
+  path.resolve(process.cwd(), 'logs'),
+  path.resolve(process.cwd(), '../logs'),
+].find((p) => fs.existsSync(p)) || path.resolve(process.cwd(), '../logs');
+
+if (!fs.existsSync(logsDir)) {
+  fs.mkdirSync(logsDir, { recursive: true });
+}
+
+const workerLogPath = path.join(logsDir, 'worker.log');
+const appLogPath = path.join(logsDir, 'app-under-test.log');
+
+function logToWorkerFile(msg: string) {
+  try {
+    fs.appendFileSync(workerLogPath, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch {}
+}
+
+const originalConsoleLog = console.log;
+const originalConsoleError = console.error;
+const originalConsoleWarn = console.warn;
+
+console.log = (...args: any[]) => {
+  originalConsoleLog(...args);
+  logToWorkerFile(args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
+
+console.error = (...args: any[]) => {
+  originalConsoleError(...args);
+  logToWorkerFile(`[ERROR] ` + args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
+
+console.warn = (...args: any[]) => {
+  originalConsoleWarn(...args);
+  logToWorkerFile(`[WARN] ` + args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
 
 const POLL_INTERVAL_MS = 2000;
 let isShuttingDown = false;
@@ -32,16 +74,27 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForHealthCheck(url: string, timeoutSeconds: number): Promise<boolean> {
+async function waitForHealthCheck(
+  url: string,
+  timeoutSeconds: number,
+  isAlive?: () => boolean
+): Promise<boolean> {
   const startTime = Date.now();
   const timeoutMs = timeoutSeconds * 1000;
 
   while (Date.now() - startTime < timeoutMs) {
     if (isShuttingDown) return false;
+
+    // Fast-fail if the application process has already exited after brief grace period
+    if (isAlive && !isAlive() && (Date.now() - startTime > 1500)) {
+      console.warn(`[Worker] Target application process terminated unexpectedly before passing health check.`);
+      return false;
+    }
+
     try {
       const isHealthy = await new Promise<boolean>((resolve) => {
         const req = http.get(url, (res) => {
-          // Accept any 2xx or 3xx or 404 (if static SPA root is served)
+          // Accept any HTTP status code < 500 as proof of life (200, 301, 302, 304, 404 all indicate a running server)
           resolve(res.statusCode !== undefined && res.statusCode < 500);
         });
         req.on('error', () => resolve(false));
@@ -94,7 +147,7 @@ function startApplication(
   startupCommand: string,
   cwd: string,
   envVars: Record<string, string>
-): { process: ChildProcess; getLog: () => string } {
+): { process: ChildProcess; getLog: () => string; isAlive: () => boolean } {
   let logBuffer = '';
 
   let effectiveCommand = startupCommand;
@@ -123,22 +176,81 @@ function startApplication(
     }
   }
 
+  // If command is simple (e.g. "npm start" or "node server.js") but cwd has no package.json,
+  // find candidate subfolder (server, backend, etc.) and run there
+  const isCompoundOrSubdir = effectiveCommand.includes('cd ') || effectiveCommand.includes('--prefix');
+  if (!isCompoundOrSubdir && !fs.existsSync(path.resolve(cwd, 'package.json'))) {
+    const candidates = ['server', 'backend', 'api', 'app', 'Client', 'client', 'frontend'];
+    for (const sub of candidates) {
+      const subDir = path.resolve(cwd, sub);
+      const subPkg = path.resolve(subDir, 'package.json');
+      if (fs.existsSync(subPkg)) {
+        try {
+          const pkg = JSON.parse(fs.readFileSync(subPkg, 'utf8'));
+          if (effectiveCommand.startsWith('npm start') && pkg.scripts?.start) {
+            console.log(`[Worker] '${effectiveCommand}' requested in ${cwd} (no root package.json), redirecting to sub-directory '${sub}'`);
+            effectiveCommand = `(cd "${sub}" && ${effectiveCommand})`;
+            break;
+          } else if (effectiveCommand.startsWith('node ') && (fs.existsSync(path.resolve(subDir, 'server.js')) || fs.existsSync(path.resolve(subDir, 'index.js')))) {
+            console.log(`[Worker] '${effectiveCommand}' requested in ${cwd} (no root package.json), redirecting to sub-directory '${sub}'`);
+            effectiveCommand = `(cd "${sub}" && ${effectiveCommand})`;
+            break;
+          }
+        } catch {}
+      }
+    }
+  }
+
+  // Preload compatibility polyfill for Node 22/25+ (SlowBuffer, etc.)
+  const candidateCompats = [
+    path.resolve(process.cwd(), 'compat.cjs'),
+    path.resolve(process.cwd(), '../compat.cjs'),
+    path.resolve(__dirname, 'compat.cjs'),
+    path.resolve(__dirname, '../compat.cjs')
+  ];
+  const compatPath = candidateCompats.find((p) => fs.existsSync(p));
+  let nodeOptions = process.env.NODE_OPTIONS || '';
+  if (compatPath && !nodeOptions.includes(compatPath)) {
+    nodeOptions = `${nodeOptions} -r "${compatPath}"`.trim();
+    console.log(`[Worker] Preloading compatibility polyfill: ${compatPath}`);
+  }
+
+  const startBanner = `\n--- [${new Date().toISOString()}] Starting Application: ${effectiveCommand} (cwd: ${cwd}) ---\n`;
+  try {
+    fs.appendFileSync(appLogPath, startBanner);
+  } catch {}
+
   const child = spawn(effectiveCommand, {
     cwd,
     shell: true,
+    detached: process.platform !== 'win32',
     env: {
       ...process.env,
       ...envVars,
       CI: 'true',
       BROWSER: 'none',
       PORT: envVars.PORT || '3000',
+      NODE_OPTIONS: nodeOptions,
     },
+  });
+
+  let processExited = false;
+  child.on('exit', (code, signal) => {
+    processExited = true;
+    const text = `\n[Process Exited] code=${code}, signal=${signal}\n`;
+    logBuffer += text;
+    try {
+      fs.appendFileSync(appLogPath, text);
+    } catch {}
   });
 
   child.on('error', (err) => {
     const text = `\n[Process Error] ${err.message}\n`;
     logBuffer += text;
     console.error(`[Worker] App process error: ${err.message}`);
+    try {
+      fs.appendFileSync(appLogPath, text);
+    } catch {}
   });
 
   child.stdout?.on('data', (data) => {
@@ -147,6 +259,9 @@ function startApplication(
     if (logBuffer.length > 50000) {
       logBuffer = logBuffer.substring(logBuffer.length - 50000);
     }
+    try {
+      fs.appendFileSync(appLogPath, text);
+    } catch {}
   });
 
   child.stderr?.on('data', (data) => {
@@ -155,11 +270,15 @@ function startApplication(
     if (logBuffer.length > 50000) {
       logBuffer = logBuffer.substring(logBuffer.length - 50000);
     }
+    try {
+      fs.appendFileSync(appLogPath, text);
+    } catch {}
   });
 
   return {
     process: child,
     getLog: () => logBuffer,
+    isAlive: () => !processExited,
   };
 }
 
@@ -230,6 +349,26 @@ async function processJob(job: WorkerJob): Promise<void> {
       }
     }
 
+    // Auto-detect project sub-directory if root has no package.json/pom.xml (monorepo / multi-folder repos)
+    // ONLY do this if commands do NOT already handle sub-directories (like "(cd server ...)" or "--prefix")
+    const commandsUseSubdirs =
+      Boolean((job.installCommand && (job.installCommand.includes('cd ') || job.installCommand.includes('--prefix'))) ||
+      (job.startupCommand && (job.startupCommand.includes('cd ') || job.startupCommand.includes('--prefix'))));
+
+    if (!commandsUseSubdirs && (!job.workingDirectory || job.workingDirectory === '.' || job.workingDirectory === './')) {
+      if (!fs.existsSync(path.resolve(workDir, 'package.json')) && !fs.existsSync(path.resolve(workDir, 'pom.xml'))) {
+        const candidates = ['server', 'backend', 'api', 'app', 'service', 'client', 'Client', 'frontend'];
+        for (const candidate of candidates) {
+          const candidateDir = path.resolve(workDir, candidate);
+          if (fs.existsSync(path.resolve(candidateDir, 'package.json')) || fs.existsSync(path.resolve(candidateDir, 'pom.xml'))) {
+            console.log(`[Worker] Detected project sub-directory: '${candidate}', updating working directory to: ${candidateDir}`);
+            workDir = candidateDir;
+            break;
+          }
+        }
+      }
+    }
+
     if (!fs.existsSync(workDir)) {
       console.error(`[Worker] Target workspace directory not found: ${workDir}`);
       await updateRunStatus(
@@ -243,24 +382,46 @@ async function processJob(job: WorkerJob): Promise<void> {
 
     // 1. Install dependencies if installCommand is provided, or auto-install if package.json exists without node_modules
     let installCmd = job.installCommand;
-    if (!installCmd && fs.existsSync(path.resolve(workDir, 'package.json')) && !fs.existsSync(path.resolve(workDir, 'node_modules'))) {
-      console.log(`[Worker] node_modules missing for package.json, auto-running 'npm install'...`);
-      installCmd = 'npm install';
+    if (!installCmd) {
+      if (fs.existsSync(path.resolve(workDir, 'package.json')) && !fs.existsSync(path.resolve(workDir, 'node_modules'))) {
+        console.log(`[Worker] node_modules missing for root package.json, auto-running 'npm install'...`);
+        installCmd = 'npm install';
+      } else {
+        // Check subdirectories
+        const subdirs = ['server', 'backend', 'Client', 'client', 'frontend', 'ui', 'api'];
+        const missingInstalls: string[] = [];
+        for (const sub of subdirs) {
+          const subPkg = path.resolve(workDir, sub, 'package.json');
+          const subModules = path.resolve(workDir, sub, 'node_modules');
+          if (fs.existsSync(subPkg) && !fs.existsSync(subModules)) {
+            missingInstalls.push(`(cd "${sub}" && npm install)`);
+          }
+        }
+        if (missingInstalls.length > 0) {
+          installCmd = missingInstalls.join(' && ');
+          console.log(`[Worker] Auto-detected missing dependencies in sub-directories, running: ${installCmd}`);
+        }
+      }
     }
 
     if (installCmd) {
-      console.log(`[Worker] Running install command: ${installCmd}`);
-      await updateRunStatus(job.runId, 'STARTING_ENVIRONMENT', undefined, 'Installing dependencies...');
-      const installResult = await runCommand(installCmd, workDir);
-      if (!installResult.success) {
-        console.error(`[Worker] Install command failed:\n${installResult.output}`);
-        await updateRunStatus(
-          job.runId,
-          'FAILED',
-          'Failed to install dependencies',
-          installResult.output.substring(0, 5000)
-        );
-        return;
+      const isCompound = installCmd.includes('&&') || installCmd.includes('(') || installCmd.includes('cd ') || installCmd.includes('--prefix');
+      if (!isCompound && installCmd.startsWith('npm') && !fs.existsSync(path.resolve(workDir, 'package.json'))) {
+        console.log(`[Worker] Skipping simple '${installCmd}' because no root package.json found in ${workDir}`);
+      } else {
+        console.log(`[Worker] Running install command: ${installCmd}`);
+        await updateRunStatus(job.runId, 'STARTING_ENVIRONMENT', undefined, 'Installing dependencies...');
+        const installResult = await runCommand(installCmd, workDir);
+        if (!installResult.success) {
+          console.error(`[Worker] Install command failed:\n${installResult.output}`);
+          await updateRunStatus(
+            job.runId,
+            'FAILED',
+            'Failed to install dependencies',
+            installResult.output.substring(0, 5000)
+          );
+          return;
+        }
       }
     }
 
@@ -286,7 +447,7 @@ async function processJob(job: WorkerJob): Promise<void> {
       // 3. Health check
       const healthUrl = `${appUrl}${job.healthCheckPath.startsWith('/') ? job.healthCheckPath : '/' + job.healthCheckPath}`;
       console.log(`[Worker] Waiting for health check at: ${healthUrl}`);
-      const isHealthy = await waitForHealthCheck(healthUrl, job.startupTimeoutSeconds || 60);
+      const isHealthy = await waitForHealthCheck(healthUrl, job.startupTimeoutSeconds || 60, started.isAlive);
 
       if (!isHealthy) {
         const logs = getStartupLog();

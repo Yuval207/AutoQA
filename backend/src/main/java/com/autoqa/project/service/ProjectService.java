@@ -39,8 +39,8 @@ public class ProjectService {
             "__MACOSX"
     );
 
-    private static final long MAX_ENTRIES = 10000;
-    private static final long MAX_TOTAL_SIZE = 500 * 1024 * 1024; // 500MB
+    private static final long MAX_ENTRIES = 200000;
+    private static final long MAX_TOTAL_SIZE = 2048L * 1024 * 1024; // 2GB
 
     private final ProjectRepository projectRepository;
     private final RepositorySourceRepository repoSourceRepository;
@@ -291,11 +291,6 @@ public class ProjectService {
             Enumeration<? extends ZipEntry> entries = zipFile.entries();
             while (entries.hasMoreElements()) {
                 ZipEntry entry = entries.nextElement();
-                entryCount++;
-                if (entryCount > MAX_ENTRIES) {
-                    throw new BadRequestException("Archive contains too many entries (max " + MAX_ENTRIES + ")");
-                }
-
                 String entryName = entry.getName();
 
                 // Path traversal protection
@@ -307,6 +302,11 @@ public class ProjectService {
                 // Skip excluded directories
                 if (shouldExclude(entryName)) {
                     continue;
+                }
+
+                entryCount++;
+                if (entryCount > MAX_ENTRIES) {
+                    throw new BadRequestException("Archive contains too many entries (max " + MAX_ENTRIES + ")");
                 }
 
                 if (entry.isDirectory()) {
@@ -372,63 +372,27 @@ public class ProjectService {
                     return c;
                 });
 
-        // Parse package.json directly if present for exact commands
-        Path packageJson = rootPath.resolve("package.json");
-        if (Files.exists(packageJson)) {
-            try {
-                com.fasterxml.jackson.databind.JsonNode tree = new com.fasterxml.jackson.databind.ObjectMapper().readTree(Files.readString(packageJson));
-                config.setInstallCommand("npm install");
-
-                if (tree.has("scripts") && tree.get("scripts").has("start")) {
-                    config.setStartupCommand("npm start");
-                } else if (tree.has("main") && !tree.get("main").asText().isBlank()) {
-                    config.setStartupCommand("node " + tree.get("main").asText());
-                } else if (Files.exists(rootPath.resolve("src/index.js"))) {
-                    config.setStartupCommand("node src/index.js");
-                } else if (Files.exists(rootPath.resolve("index.js"))) {
-                    config.setStartupCommand("node index.js");
-                } else if (Files.exists(rootPath.resolve("server.js"))) {
-                    config.setStartupCommand("node server.js");
-                }
-            } catch (Exception ignored) {}
-        }
-
-        // Framework specific overrides
-        if (analysis.contains("\"framework\":\"vite\"") || analysis.contains("\"framework\":\"react-vite\"")) {
-            config.setStartupCommand("npm run dev -- --host 0.0.0.0");
-            config.setPort(5173);
-        } else if (config.getStartupCommand() == null) {
-            if (Files.exists(rootPath.resolve("src/index.js"))) {
-                config.setStartupCommand("node src/index.js");
-            } else if (Files.exists(rootPath.resolve("index.js"))) {
-                config.setStartupCommand("node index.js");
-            } else {
-                config.setStartupCommand("node server.js");
-            }
-        }
-
-        if (config.getPort() == null) {
-            config.setPort(3000);
-        }
-
-        // Health check path: if codebase has /health, use /health, otherwise /
-        if (Files.exists(rootPath.resolve("src/index.js")) || Files.exists(rootPath.resolve("index.js")) || Files.exists(rootPath.resolve("server.js"))) {
-            try {
-                String code = Files.exists(rootPath.resolve("src/index.js")) ? Files.readString(rootPath.resolve("src/index.js")) :
-                              (Files.exists(rootPath.resolve("index.js")) ? Files.readString(rootPath.resolve("index.js")) : Files.readString(rootPath.resolve("server.js")));
-                if (code.contains("/health")) {
-                    config.setHealthCheckPath("/health");
-                } else {
-                    config.setHealthCheckPath("/");
-                }
-            } catch (Exception ignored) {
-                config.setHealthCheckPath("/health");
-            }
+        // Use deep architecture analysis to pick the optimal execution profile
+        RepositoryAnalyzer.ArchitectureAnalysis arch = repositoryAnalyzer.detectArchitecture(rootPath);
+        if (arch != null && arch.recommendedProfile != null) {
+            RepositoryAnalyzer.ExecutionProfile prof = arch.recommendedProfile;
+            config.setWorkingDirectory(prof.workingDirectory);
+            config.setInstallCommand(prof.installCommand);
+            config.setStartupCommand(prof.startupCommand);
+            config.setPort(prof.port);
+            config.setHealthCheckPath(prof.healthCheckPath);
+            config.setStartupTimeoutSeconds(60);
+            log.info("Auto-configured environment for project {} with profile '{}' (port: {}, startup: '{}')",
+                    project.getId(), prof.name, prof.port, prof.startupCommand);
         } else {
-            config.setHealthCheckPath("/health");
+            config.setWorkingDirectory(".");
+            config.setInstallCommand("npm install");
+            config.setStartupCommand("npm start");
+            config.setPort(3000);
+            config.setHealthCheckPath("/");
+            config.setStartupTimeoutSeconds(60);
         }
 
-        config.setWorkingDirectory(null);
         envConfigRepository.save(config);
     }
 

@@ -46,6 +46,7 @@ public class TestRunService {
     private final RepositorySourceRepository repoSourceRepository;
     private final EnvironmentConfigRepository envConfigRepository;
     private final ProjectService projectService;
+    private final com.autoqa.repository.service.RepositoryAnalyzer repositoryAnalyzer;
 
         // SSE emitters for live updates
     private final Map<UUID, List<SseEmitter>> runEmitters = new ConcurrentHashMap<>();
@@ -61,7 +62,8 @@ public class TestRunService {
                           BugFindingRepository findingRepository,
                           RepositorySourceRepository repoSourceRepository,
                           EnvironmentConfigRepository envConfigRepository,
-                          ProjectService projectService) {
+                          ProjectService projectService,
+                          com.autoqa.repository.service.RepositoryAnalyzer repositoryAnalyzer) {
         this.testRunRepository = testRunRepository;
         this.executionRepository = executionRepository;
         this.stepResultRepository = stepResultRepository;
@@ -71,6 +73,7 @@ public class TestRunService {
         this.repoSourceRepository = repoSourceRepository;
         this.envConfigRepository = envConfigRepository;
         this.projectService = projectService;
+        this.repositoryAnalyzer = repositoryAnalyzer;
     }
 
     @Transactional
@@ -235,6 +238,31 @@ public class TestRunService {
                 p = java.nio.file.Paths.get(System.getProperty("user.dir")).resolve(p).normalize().toAbsolutePath();
             }
             absoluteExtractedPath = p.toString();
+        }
+
+        // Self-heal environment config if missing or defaulting to root "npm start" when root has no package.json
+        if (absoluteExtractedPath != null) {
+            java.nio.file.Path rootDir = java.nio.file.Paths.get(absoluteExtractedPath);
+            boolean rootHasPkg = java.nio.file.Files.exists(rootDir.resolve("package.json"));
+            String currentStartup = envConfig != null ? envConfig.getStartupCommand() : null;
+            if (envConfig == null || (!rootHasPkg && ("npm start".equals(currentStartup) || currentStartup == null || currentStartup.isBlank()))) {
+                var arch = repositoryAnalyzer.detectArchitecture(rootDir);
+                if (arch != null && arch.recommendedProfile != null) {
+                    var prof = arch.recommendedProfile;
+                    log.info("Auto-healing environment configuration for run {} with profile '{}'", run.getId(), prof.name);
+                    if (envConfig == null) {
+                        envConfig = new EnvironmentConfiguration();
+                        envConfig.setProject(run.getProject());
+                    }
+                    envConfig.setWorkingDirectory(prof.workingDirectory);
+                    envConfig.setInstallCommand(prof.installCommand);
+                    envConfig.setStartupCommand(prof.startupCommand);
+                    envConfig.setPort(prof.port);
+                    envConfig.setHealthCheckPath(prof.healthCheckPath);
+                    envConfig.setStartupTimeoutSeconds(60);
+                    envConfig = envConfigRepository.save(envConfig);
+                }
+            }
         }
 
         String workingDir = envConfig != null ? envConfig.getWorkingDirectory() : null;

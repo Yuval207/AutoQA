@@ -13,18 +13,70 @@ export interface AuthResponse {
   user?: User;
 }
 
+export interface DetectedService {
+  name: string;
+  type: 'FRONTEND' | 'BACKEND' | 'STANDALONE';
+  directory: string;
+  framework: string;
+  packageManager: string;
+  installCommand: string;
+  startupCommand: string;
+  port: number;
+  healthCheckPath: string;
+}
+
+export interface ExecutionProfile {
+  id: string;
+  name: string;
+  description: string;
+  workingDirectory: string;
+  installCommand: string;
+  startupCommand: string;
+  port: number;
+  healthCheckPath: string;
+  isRecommended: boolean;
+}
+
+export interface ArchitectureAnalysis {
+  architecture: 'FULLSTACK_SPLIT' | 'FRONTEND_ONLY' | 'BACKEND_ONLY' | 'MONOLITH' | 'UNKNOWN';
+  confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+  description: string;
+  requiresConfirmation: boolean;
+  services: DetectedService[];
+  recommendedProfile?: ExecutionProfile;
+  availableProfiles: ExecutionProfile[];
+  detectionNotes: string[];
+}
+
 export interface Project {
   id: string;
   name: string;
   description: string | null;
-  repositoryType: string;
+  repositoryType?: string;
+  projectType?: string;
   status: string;
-  detectedFramework: string | null;
-  detectedPackageManager: string | null;
-  installCommand: string | null;
-  startupCommand: string | null;
-  port: number;
-  healthCheckPath: string;
+  detectedFramework?: string | null;
+  detectedPackageManager?: string | null;
+  installCommand?: string | null;
+  startupCommand?: string | null;
+  port?: number;
+  healthCheckPath?: string;
+  repository?: {
+    id: string;
+    sourceType: string;
+    originalFilename: string;
+    status: string;
+    analysisResult?: string;
+  };
+  environment?: {
+    id: string;
+    startupCommand: string;
+    installCommand?: string;
+    port: number;
+    healthCheckPath: string;
+    startupTimeoutSeconds?: number;
+    workingDirectory?: string;
+  };
   createdAt: string;
   updatedAt: string;
 }

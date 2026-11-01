@@ -30,7 +30,26 @@ export const TestRunDetail: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [selectedScreenshot, setSelectedScreenshot] = useState<string | null>(null);
+  const [imageError, setImageError] = useState(false);
   const [expandedExecutions, setExpandedExecutions] = useState<Record<string, boolean>>({});
+
+  const parseEvidenceRefs = (raw: string | null | undefined): string[] => {
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => String(item).trim()).filter(Boolean);
+      }
+      if (typeof parsed === 'string') {
+        return [parsed.trim()];
+      }
+    } catch {}
+    const cleaned = raw.replace(/[\[\]"']/g, '').trim();
+    if (cleaned.includes(',')) {
+      return cleaned.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    return cleaned ? [cleaned] : [];
+  };
 
   const loadData = async (silent = false) => {
     if (!runId) return;
@@ -222,7 +241,10 @@ export const TestRunDetail: React.FC = () => {
               <AlertTriangle className="w-4 h-4 text-rose-400" />
               <span>Execution Error</span>
             </div>
-            <div>{run.errorMessage}</div>
+            <div className="font-mono text-rose-300/90">{run.errorMessage}</div>
+            <p className="mt-2 text-[11px] text-slate-400">
+              Note: When the application environment fails to initialize or encounters a setup error, test scenarios are not executed, so individual browser step screenshots are not captured. Inspect the service logs in <code className="text-slate-300">logs/worker.log</code> or <code className="text-slate-300">logs/app-under-test.log</code> for full startup diagnostics.
+            </p>
           </div>
         )}
       </div>
@@ -307,22 +329,25 @@ export const TestRunDetail: React.FC = () => {
                 )}
 
                 {/* Evidence screenshot preview */}
-                {bug.evidenceRefs && (
-                  <div className="mt-4 pt-4 border-t border-slate-800 flex items-center gap-4">
+                {bug.evidenceRefs && parseEvidenceRefs(bug.evidenceRefs).length > 0 && (
+                  <div className="mt-4 pt-4 border-t border-slate-800 flex flex-wrap items-center gap-3">
                     <span className="text-xs font-semibold text-slate-400 flex items-center gap-1.5">
                       <Camera className="w-3.5 h-3.5 text-indigo-400" />
                       <span>Captured Evidence:</span>
                     </span>
-                    <button
-                      onClick={() => {
-                        const cleanRef = bug.evidenceRefs!.replace(/^[\\\["\']+|[\\\]"\']+$/g, "");
-                        setSelectedScreenshot(api.getArtifactUrl(run.id, cleanRef));
-                      }}
-                      className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-400 hover:text-indigo-300 bg-indigo-600/10 hover:bg-indigo-600/20 px-3 py-1.5 rounded-lg border border-indigo-500/20 transition-colors"
-                    >
-                      <Maximize2 className="w-3.5 h-3.5" />
-                      <span>View Failure Screenshot ({bug.evidenceRefs.replace(/^[\\\["\']+|[\\\]"\']+$/g, "")})</span>
-                    </button>
+                    {parseEvidenceRefs(bug.evidenceRefs).map((ref, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => {
+                          setImageError(false);
+                          setSelectedScreenshot(api.getArtifactUrl(run.id, ref));
+                        }}
+                        className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-400 hover:text-indigo-300 bg-indigo-600/10 hover:bg-indigo-600/20 px-3 py-1.5 rounded-lg border border-indigo-500/20 transition-colors"
+                      >
+                        <Maximize2 className="w-3.5 h-3.5" />
+                        <span>View Failure Screenshot ({ref})</span>
+                      </button>
+                    ))}
                   </div>
                 )}
 
@@ -445,11 +470,12 @@ export const TestRunDetail: React.FC = () => {
                                 <td className="py-2.5 text-right pr-1">
                                   {st.screenshotPath ? (
                                     <button
-                                      onClick={() =>
+                                      onClick={() => {
+                                        setImageError(false);
                                         setSelectedScreenshot(
                                           api.getArtifactUrl(run.id, st.screenshotPath!)
-                                        )
-                                      }
+                                        );
+                                      }}
                                       className="inline-flex items-center gap-1 text-indigo-400 hover:text-indigo-300 hover:underline"
                                     >
                                       <Camera className="w-3 h-3" />
@@ -483,22 +509,40 @@ export const TestRunDetail: React.FC = () => {
                 <span>Playwright Screenshot Artifact</span>
               </span>
               <button
-                onClick={() => setSelectedScreenshot(null)}
+                onClick={() => {
+                  setSelectedScreenshot(null);
+                  setImageError(false);
+                }}
                 className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="p-4 max-h-[80vh] overflow-auto flex items-center justify-center bg-black/50">
-              <img
-                src={selectedScreenshot}
-                alt="Test Evidence Screenshot"
-                className="rounded-lg shadow-lg max-w-full h-auto border border-slate-800"
-                onError={(e) => {
-                  (e.target as HTMLElement).style.display = 'none';
-                  alert('Screenshot is being processed or could not be loaded from backend storage.');
-                }}
-              />
+            <div className="p-4 max-h-[80vh] min-h-[300px] overflow-auto flex flex-col items-center justify-center bg-black/50">
+              {imageError ? (
+                <div className="text-center p-6 max-w-md">
+                  <AlertTriangle className="w-10 h-10 text-amber-400 mx-auto mb-3" />
+                  <h4 className="text-sm font-semibold text-white mb-1">Screenshot Artifact Unavailable</h4>
+                  <p className="text-xs text-slate-400 mb-4 leading-relaxed">
+                    The artifact image could not be loaded from backend storage. This happens if the test step completed without a graphical browser window or if the run failed before screenshots could be captured.
+                  </p>
+                  <a
+                    href={selectedScreenshot}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 underline font-mono"
+                  >
+                    Direct Artifact Link ({selectedScreenshot.split('/').pop()})
+                  </a>
+                </div>
+              ) : (
+                <img
+                  src={selectedScreenshot}
+                  alt="Test Evidence Screenshot"
+                  className="rounded-lg shadow-lg max-w-full h-auto border border-slate-800"
+                  onError={() => setImageError(true)}
+                />
+              )}
             </div>
           </div>
         </div>

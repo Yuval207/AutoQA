@@ -1,0 +1,17 @@
+{
+  "name": "autoqa",
+  "version": "1.0.0",
+  "description": "AutoQA - Autonomous QA Agent",
+  "private": true,
+  "scripts": {
+    "dev:backend": "mkdir -p logs && (cd backend && mvn spring-boot:run) 2>&1 | tee -a logs/server.log",
+    "dev:worker": "mkdir -p logs && (cd worker && npm run dev) 2>&1 | tee -a logs/worker.log",
+    "dev:frontend": "mkdir -p logs && (cd frontend && npm run dev) 2>&1 | tee -a logs/frontend.log",
+    "logs:all": "tail -f logs/*.log",
+    "logs:server": "tail -f logs/server.log",
+    "logs:worker": "tail -f logs/worker.log",
+    "logs:frontend": "tail -f logs/frontend.log",
+    "logs:app": "tail -f logs/app-under-test.log"
+  }
+}
+

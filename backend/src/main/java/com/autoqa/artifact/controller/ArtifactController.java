@@ -43,6 +43,7 @@ public class ArtifactController {
         try {
             Path current = Paths.get(System.getProperty("user.dir"));
             candidateBases.add(current.resolve("data/artifacts"));
+            candidateBases.add(current.resolve("../data/artifacts"));
             if (current.getParent() != null) {
                 candidateBases.add(current.getParent().resolve("data/artifacts"));
                 candidateBases.add(current.getParent().resolve("worker/data/artifacts"));
@@ -51,11 +52,32 @@ public class ArtifactController {
 
         Path foundPath = null;
         for (Path base : candidateBases) {
+            if (!Files.exists(base)) continue;
+
+            // 1. Check exact base / runId / filename
             Path candidate = base.resolve(runId).resolve(filename).toAbsolutePath().normalize();
             if (Files.exists(candidate)) {
                 foundPath = candidate;
                 break;
             }
+
+            // 2. Check base / filename directly
+            Path directCandidate = base.resolve(filename).toAbsolutePath().normalize();
+            if (Files.exists(directCandidate)) {
+                foundPath = directCandidate;
+                break;
+            }
+
+            // 3. Recursive search inside base for the filename (depth 4)
+            try (java.util.stream.Stream<Path> stream = Files.walk(base, 4)) {
+                java.util.Optional<Path> match = stream
+                        .filter(p -> Files.isRegularFile(p) && p.getFileName().toString().equalsIgnoreCase(filename))
+                        .findFirst();
+                if (match.isPresent()) {
+                    foundPath = match.get();
+                    break;
+                }
+            } catch (Exception ignored) {}
         }
 
         if (foundPath == null) {

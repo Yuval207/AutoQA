@@ -1,15 +1,19 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import * as api from '../api/client';
-import { Project } from '../api/types';
+import { Project, ArchitectureAnalysis, ExecutionProfile } from '../api/types';
 import {
   Upload,
   ArrowRight,
   ArrowLeft,
-  CheckCircle2,
   AlertCircle,
   Sparkles,
-  Terminal,
+  Server,
+  Globe,
+  Layers,
+  Sliders,
+  Check,
+  AlertTriangle,
 } from 'lucide-react';
 
 export const NewProject: React.FC = () => {
@@ -28,12 +32,42 @@ export const NewProject: React.FC = () => {
   // Step 2: Upload
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
-  // Step 3: Environment Configuration
+  // Step 3: Environment Configuration & Architecture Discovery
+  const [analysis, setAnalysis] = useState<ArchitectureAnalysis | null>(null);
+  const [selectedProfileId, setSelectedProfileId] = useState<string>('fullstack');
+  const [workingDirectory, setWorkingDirectory] = useState('.');
   const [installCommand, setInstallCommand] = useState('');
   const [startupCommand, setStartupCommand] = useState('');
   const [port, setPort] = useState(3000);
-  const [healthCheckPath, setHealthCheckPath] = useState('/health');
+  const [healthCheckPath, setHealthCheckPath] = useState('/');
   const [startupTimeout, setStartupTimeout] = useState(60);
+  const [showCustomizer, setShowCustomizer] = useState(false);
+
+  const applyProfile = (prof: ExecutionProfile) => {
+    setSelectedProfileId(prof.id);
+    setWorkingDirectory(prof.workingDirectory || '.');
+    setInstallCommand(prof.installCommand || '');
+    setStartupCommand(prof.startupCommand || '');
+    setPort(prof.port || 3000);
+    setHealthCheckPath(prof.healthCheckPath || '/');
+  };
+
+  const applyPreset = (preset: {
+    name: string;
+    install: string;
+    startup: string;
+    port: number;
+    health: string;
+    cwd: string;
+  }) => {
+    setSelectedProfileId('custom');
+    setWorkingDirectory(preset.cwd);
+    setInstallCommand(preset.install);
+    setStartupCommand(preset.startup);
+    setPort(preset.port);
+    setHealthCheckPath(preset.health);
+    setShowCustomizer(true);
+  };
 
   // Step 1 Submit: Create Project
   const handleCreateProject = async (e: React.FormEvent) => {
@@ -65,11 +99,30 @@ export const NewProject: React.FC = () => {
     try {
       const updated = await api.uploadRepository(createdProject.id, selectedFile);
       setCreatedProject(updated);
-      const env = (updated as any).environment;
-      setInstallCommand(env?.installCommand || updated.installCommand || 'npm install');
-      setStartupCommand(env?.startupCommand || updated.startupCommand || 'npm start');
-      setPort(env?.port || updated.port || 3000);
-      setHealthCheckPath(env?.healthCheckPath || updated.healthCheckPath || '/health');
+
+      // Parse Deep Architecture Analysis
+      let arch: ArchitectureAnalysis | null = null;
+      try {
+        const repo = (updated as any).repository;
+        if (repo?.analysisResult) {
+          const raw = JSON.parse(repo.analysisResult);
+          arch = raw.architectureAnalysis || null;
+        }
+      } catch {}
+
+      setAnalysis(arch);
+
+      if (arch?.recommendedProfile) {
+        applyProfile(arch.recommendedProfile);
+      } else {
+        const env = (updated as any).environment;
+        setInstallCommand(env?.installCommand || updated.installCommand || 'npm install');
+        setStartupCommand(env?.startupCommand || updated.startupCommand || 'npm start');
+        setPort(env?.port || updated.port || 3000);
+        setHealthCheckPath(env?.healthCheckPath || updated.healthCheckPath || '/');
+        setWorkingDirectory('.');
+      }
+
       setStep(3);
     } catch (err: any) {
       setError(err.message || 'Failed to upload and analyze repository archive');
@@ -92,10 +145,25 @@ export const NewProject: React.FC = () => {
         const file = new File([blob], 'demo-app.zip', { type: 'application/zip' });
         const updated = await api.uploadRepository(createdProject.id, file);
         setCreatedProject(updated);
-        setInstallCommand(updated.installCommand || '');
-        setStartupCommand(updated.startupCommand || 'node server.js');
-        setPort(updated.port || 3000);
-        setHealthCheckPath(updated.healthCheckPath || '/health');
+
+        let arch: ArchitectureAnalysis | null = null;
+        try {
+          const repo = (updated as any).repository;
+          if (repo?.analysisResult) {
+            const raw = JSON.parse(repo.analysisResult);
+            arch = raw.architectureAnalysis || null;
+          }
+        } catch {}
+        setAnalysis(arch);
+
+        if (arch?.recommendedProfile) {
+          applyProfile(arch.recommendedProfile);
+        } else {
+          setInstallCommand(updated.installCommand || '');
+          setStartupCommand(updated.startupCommand || 'node server.js');
+          setPort(updated.port || 3000);
+          setHealthCheckPath(updated.healthCheckPath || '/health');
+        }
         setStep(3);
       } else {
         // Fallback: configure environment directly
@@ -108,7 +176,6 @@ export const NewProject: React.FC = () => {
         navigate(`/projects/${createdProject.id}`);
       }
     } catch (err: any) {
-      // In case /demo-app.zip isn't in public dir, configure environment directly
       await api.updateEnvironment(createdProject.id, {
         startupCommand: 'node server.js',
         port: 3000,
@@ -122,14 +189,15 @@ export const NewProject: React.FC = () => {
   };
 
   // Step 3 Submit: Save Environment
-  const handleSaveEnvironment = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSaveEnvironment = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (!createdProject) return;
     setError(null);
     setLoading(true);
 
     try {
       await api.updateEnvironment(createdProject.id, {
+        workingDirectory: workingDirectory.trim() || undefined,
         installCommand: installCommand.trim() || undefined,
         startupCommand: startupCommand.trim() || undefined,
         port: Number(port) || 3000,
@@ -350,135 +418,380 @@ export const NewProject: React.FC = () => {
         </div>
       )}
 
-      {/* STEP 3: Environment Settings */}
+      {/* STEP 3: Environment Settings & Architecture Confirmation */}
       {step === 3 && (
-        <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl">
-          <div className="mb-6">
-            <h2 className="text-xl font-bold text-white">Configure Environment Execution</h2>
-            <p className="text-slate-400 text-sm mt-1">
-              Verify detected startup scripts and health checks before launching autonomous tests
-            </p>
+        <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl space-y-6">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xl font-bold text-white">Project Architecture & Runtime</span>
+                <span
+                  className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full border ${
+                    analysis?.architecture === 'FULLSTACK_SPLIT'
+                      ? 'bg-purple-500/10 border-purple-500/30 text-purple-300'
+                      : analysis?.architecture === 'FRONTEND_ONLY'
+                      ? 'bg-cyan-500/10 border-cyan-500/30 text-cyan-300'
+                      : analysis?.architecture === 'BACKEND_ONLY'
+                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                      : analysis?.architecture === 'MONOLITH'
+                      ? 'bg-blue-500/10 border-blue-500/30 text-blue-300'
+                      : 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                  }`}
+                >
+                  {analysis?.architecture === 'FULLSTACK_SPLIT'
+                    ? 'Fullstack (Split)'
+                    : analysis?.architecture === 'FRONTEND_ONLY'
+                    ? 'Frontend Web App'
+                    : analysis?.architecture === 'BACKEND_ONLY'
+                    ? 'Backend API'
+                    : analysis?.architecture === 'MONOLITH'
+                    ? 'Monolith'
+                    : 'Unidentified'}
+                </span>
+              </div>
+              <p className="text-slate-400 text-xs mt-1">
+                AutoQA automatically scanned the workspace structure and detected how to build, run, and verify this application.
+              </p>
+            </div>
           </div>
 
-          {/* Analysis Card */}
-          <div className="mb-6 p-4 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
-                <CheckCircle2 className="w-5 h-5" />
+          {/* 1. DISCOVERED SERVICES BREAKDOWN */}
+          {analysis?.services && analysis.services.length > 0 && (
+            <div className="space-y-3">
+              <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Detected Components ({analysis.services.length})</span>
+              </span>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {analysis.services.map((svc, idx) => (
+                  <div
+                    key={idx}
+                    className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 flex flex-col justify-between"
+                  >
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          {svc.type === 'FRONTEND' ? (
+                            <Globe className="w-4 h-4 text-cyan-400" />
+                          ) : (
+                            <Server className="w-4 h-4 text-emerald-400" />
+                          )}
+                          <span className="text-sm font-bold text-white">{svc.name}</span>
+                        </div>
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+                          Port {svc.port}
+                        </span>
+                      </div>
+                      <div className="text-xs text-slate-400 space-y-1">
+                        <div>
+                          <span className="text-slate-500">Directory: </span>
+                          <code className="text-indigo-300 font-mono">{svc.directory}/</code>
+                        </div>
+                        <div>
+                          <span className="text-slate-500">Framework: </span>
+                          <span className="text-slate-200">{svc.framework}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-3 pt-2 border-t border-slate-800/80">
+                      <span className="text-[10px] text-slate-500 uppercase font-semibold block mb-0.5">
+                        Start Command
+                      </span>
+                      <code className="text-[11px] font-mono text-cyan-300 truncate block">
+                        {svc.startupCommand}
+                      </code>
+                    </div>
+                  </div>
+                ))}
               </div>
+            </div>
+          )}
+
+          {/* 2. EXECUTION PROFILE SELECTOR */}
+          {analysis?.availableProfiles && analysis.availableProfiles.length > 1 && (
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                <Sliders className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Choose How To Run Application</span>
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {analysis.availableProfiles.map((prof) => {
+                  const isSelected = selectedProfileId === prof.id;
+                  return (
+                    <button
+                      key={prof.id}
+                      type="button"
+                      onClick={() => applyProfile(prof)}
+                      className={`text-left p-3.5 rounded-xl border transition-all flex flex-col justify-between ${
+                        isSelected
+                          ? 'bg-indigo-950/40 border-indigo-500 text-white shadow-lg shadow-indigo-500/10'
+                          : 'bg-slate-950/40 border-slate-800 hover:border-slate-700 text-slate-400'
+                      }`}
+                    >
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className={`text-xs font-bold ${isSelected ? 'text-indigo-200' : 'text-slate-300'}`}>
+                            {prof.name}
+                          </span>
+                          {prof.isRecommended && (
+                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                              RECOMMENDED
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-slate-400 leading-relaxed mb-3">
+                          {prof.description}
+                        </p>
+                      </div>
+                      <div className="text-[10px] font-mono text-slate-500 flex items-center justify-between pt-2 border-t border-slate-800/60">
+                        <span>Port {prof.port}</span>
+                        <span>{prof.workingDirectory === '.' ? 'Root' : prof.workingDirectory}</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* 3. FALLBACK PRESETS IF UNKNOWN */}
+          {(!analysis || analysis.architecture === 'UNKNOWN' || analysis.confidence === 'LOW') && (
+            <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200">
+              <div className="flex items-center gap-2 font-bold text-xs mb-1">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>Could not automatically detect project type</span>
+              </div>
+              <p className="text-xs text-amber-300/80 mb-3">
+                Select a framework preset below or enter your custom startup commands:
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    applyPreset({
+                      name: 'Vite React',
+                      cwd: '.',
+                      install: 'npm install',
+                      startup: 'npm run dev -- --host 0.0.0.0',
+                      port: 5173,
+                      health: '/',
+                    })
+                  }
+                  className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-xs font-medium transition-colors"
+                >
+                  ⚡ React / Vite (5173)
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    applyPreset({
+                      name: 'Next.js',
+                      cwd: '.',
+                      install: 'npm install',
+                      startup: 'npm run dev',
+                      port: 3000,
+                      health: '/',
+                    })
+                  }
+                  className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-xs font-medium transition-colors"
+                >
+                  ▲ Next.js (3000)
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    applyPreset({
+                      name: 'Node Express',
+                      cwd: '.',
+                      install: 'npm install',
+                      startup: 'node server.js',
+                      port: 4000,
+                      health: '/health',
+                    })
+                  }
+                  className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-xs font-medium transition-colors"
+                >
+                  🟢 Node Express (4000)
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    applyPreset({
+                      name: 'Spring Boot',
+                      cwd: '.',
+                      install: 'mvn clean install -DskipTests',
+                      startup: 'mvn spring-boot:run',
+                      port: 8080,
+                      health: '/actuator/health',
+                    })
+                  }
+                  className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-xs font-medium transition-colors"
+                >
+                  ☕ Spring Boot (8080)
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    applyPreset({
+                      name: 'Python Web',
+                      cwd: '.',
+                      install: 'pip install -r requirements.txt',
+                      startup: 'python app.py',
+                      port: 8000,
+                      health: '/',
+                    })
+                  }
+                  className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-xs font-medium transition-colors"
+                >
+                  🐍 Python App (8000)
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* 4. CONFIRMATION CARD (USER ASKED FOR EXPLICIT CONFIRMATION) */}
+          <div className="p-4 rounded-xl bg-indigo-950/20 border border-indigo-500/30">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
-                <div className="text-xs text-slate-400">Detected Framework</div>
-                <div className="text-sm font-bold text-white">
-                  {createdProject?.detectedFramework || 'Node.js'} (
-                  {createdProject?.detectedPackageManager || 'npm'})
+                <span className="text-xs font-bold text-indigo-300 uppercase tracking-wider block mb-1">
+                  Active Execution Plan
+                </span>
+                <div className="text-sm font-semibold text-white flex items-center gap-2">
+                  <span>Target:</span>
+                  <code className="text-cyan-300 bg-cyan-950/40 px-2 py-0.5 rounded text-xs font-mono">
+                    http://localhost:{port}{healthCheckPath}
+                  </code>
+                  <span className="text-slate-400 text-xs">(CWD: {workingDirectory})</span>
+                </div>
+                <div className="text-xs font-mono text-slate-400 mt-1 truncate max-w-xl">
+                  <span className="text-slate-500">Run: </span>
+                  <code>{startupCommand}</code>
                 </div>
               </div>
-            </div>
-            <div className="text-right">
-              <span className="text-[11px] font-mono px-2 py-1 rounded bg-slate-800 text-slate-300">
-                Port {port}
-              </span>
-            </div>
-          </div>
 
-          <form onSubmit={handleSaveEnvironment} className="space-y-4">
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
-                <Terminal className="w-3.5 h-3.5 text-indigo-400" />
-                <span>Install Command (Optional)</span>
-              </label>
-              <input
-                type="text"
-                value={installCommand}
-                onChange={(e) => setInstallCommand(e.target.value)}
-                placeholder="e.g. npm install"
-                className="w-full font-mono bg-slate-950/80 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
-                <Terminal className="w-3.5 h-3.5 text-cyan-400" />
-                <span>Startup Command</span>
-              </label>
-              <input
-                type="text"
-                required
-                value={startupCommand}
-                onChange={(e) => setStartupCommand(e.target.value)}
-                placeholder="e.g. node server.js or npm start"
-                className="w-full font-mono bg-slate-950/80 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
-              />
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
-                  Port
-                </label>
-                <input
-                  type="number"
-                  required
-                  value={port}
-                  onChange={(e) => setPort(parseInt(e.target.value, 10))}
-                  className="w-full font-mono bg-slate-950/80 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
-                  Health Path
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={healthCheckPath}
-                  onChange={(e) => setHealthCheckPath(e.target.value)}
-                  placeholder="/health"
-                  className="w-full font-mono bg-slate-950/80 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
-                  Timeout (sec)
-                </label>
-                <input
-                  type="number"
-                  required
-                  value={startupTimeout}
-                  onChange={(e) => setStartupTimeout(parseInt(e.target.value, 10))}
-                  className="w-full font-mono bg-slate-950/80 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-            </div>
-
-            <div className="pt-6 flex items-center justify-between border-t border-slate-800">
               <button
                 type="button"
-                onClick={() => setStep(2)}
-                className="text-xs font-semibold text-slate-400 hover:text-white flex items-center gap-1"
+                onClick={() => setShowCustomizer(!showCustomizer)}
+                className="shrink-0 inline-flex items-center gap-1.5 text-xs font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg border border-slate-700 transition-colors"
               >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>Back</span>
-              </button>
-
-              <button
-                type="submit"
-                disabled={loading}
-                className="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 px-6 rounded-xl shadow-lg shadow-indigo-600/30 flex items-center gap-2 transition-all disabled:opacity-50"
-              >
-                {loading ? (
-                  <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                ) : (
-                  <>
-                    <span>Complete & Open Project</span>
-                    <CheckCircle2 className="w-4 h-4" />
-                  </>
-                )}
+                <Sliders className="w-3.5 h-3.5 text-indigo-400" />
+                <span>{showCustomizer ? 'Hide Details' : 'Customize Commands'}</span>
               </button>
             </div>
-          </form>
+
+            {/* Collapsible customizer fields */}
+            {showCustomizer && (
+              <div className="mt-4 pt-4 border-t border-indigo-500/20 space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1">
+                      Working Directory
+                    </label>
+                    <input
+                      type="text"
+                      value={workingDirectory}
+                      onChange={(e) => setWorkingDirectory(e.target.value)}
+                      placeholder="e.g. . or Client or server"
+                      className="w-full font-mono bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1">
+                      Install Command
+                    </label>
+                    <input
+                      type="text"
+                      value={installCommand}
+                      onChange={(e) => setInstallCommand(e.target.value)}
+                      placeholder="e.g. npm install"
+                      className="w-full font-mono bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1">
+                    Startup Command
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={startupCommand}
+                    onChange={(e) => setStartupCommand(e.target.value)}
+                    placeholder="e.g. npm start or node server.js"
+                    className="w-full font-mono bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1">
+                      Port
+                    </label>
+                    <input
+                      type="number"
+                      required
+                      value={port}
+                      onChange={(e) => setPort(parseInt(e.target.value, 10))}
+                      className="w-full font-mono bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1">
+                      Health Check Path
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={healthCheckPath}
+                      onChange={(e) => setHealthCheckPath(e.target.value)}
+                      placeholder="/"
+                      className="w-full font-mono bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1">
+                      Timeout (seconds)
+                    </label>
+                    <input
+                      type="number"
+                      required
+                      value={startupTimeout}
+                      onChange={(e) => setStartupTimeout(parseInt(e.target.value, 10))}
+                      className="w-full font-mono bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="pt-4 flex items-center justify-between border-t border-slate-800">
+            <button
+              type="button"
+              onClick={() => setStep(2)}
+              className="text-xs font-semibold text-slate-400 hover:text-white flex items-center gap-1"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Back</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleSaveEnvironment()}
+              disabled={loading || !startupCommand}
+              className="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-2.5 px-6 rounded-xl shadow-lg shadow-emerald-600/30 flex items-center gap-2 transition-all disabled:opacity-50"
+            >
+              {loading ? (
+                <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              ) : (
+                <>
+                  <Check className="w-4 h-4" />
+                  <span>Confirm Configuration & Open Project</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
       )}
     </div>
