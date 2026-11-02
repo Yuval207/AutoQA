@@ -282,9 +282,11 @@ public class TestRunService {
                 workingDir,
                 envConfig != null ? envConfig.getEnvironmentVariables() : null,
                 testCases,
-                java.nio.file.Paths.get(System.getProperty("user.dir"))
-                        .resolve(artifactsPath != null ? artifactsPath : "./data/artifacts")
-                        .normalize().toAbsolutePath().toString()
+
+                (artifactsPath != null && java.nio.file.Paths.get(artifactsPath).isAbsolute())
+                        ? artifactsPath
+                        : java.nio.file.Paths.get(System.getProperty("user.dir")).resolve(artifactsPath != null ? artifactsPath : "data/artifacts").normalize().toAbsolutePath().toString()
+
 
         ));
     }

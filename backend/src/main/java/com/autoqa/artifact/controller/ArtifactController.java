@@ -37,16 +37,16 @@ public class ArtifactController {
         if (artifactsPath != null && !artifactsPath.isBlank()) {
             candidateBases.add(Paths.get(artifactsPath));
         }
-        candidateBases.add(Paths.get("/Users/yuvalsharma/Desktop/AutoQA/data/artifacts"));
-        candidateBases.add(Paths.get("/Users/yuvalsharma/Desktop/AutoQA/worker/data/artifacts"));
-        candidateBases.add(Paths.get("/Users/yuvalsharma/Desktop/AutoQA/backend/data/artifacts"));
         try {
             Path current = Paths.get(System.getProperty("user.dir"));
             candidateBases.add(current.resolve("data/artifacts"));
             candidateBases.add(current.resolve("../data/artifacts"));
+            candidateBases.add(current.resolve("worker/data/artifacts"));
+            candidateBases.add(current.resolve("backend/data/artifacts"));
             if (current.getParent() != null) {
                 candidateBases.add(current.getParent().resolve("data/artifacts"));
                 candidateBases.add(current.getParent().resolve("worker/data/artifacts"));
+                candidateBases.add(current.getParent().resolve("backend/data/artifacts"));
             }
         } catch (Exception ignored) {}
 
