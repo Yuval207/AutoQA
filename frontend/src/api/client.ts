@@ -128,6 +128,10 @@ export async function createProject(data: CreateProjectRequest): Promise<Project
   });
 }
 
+export async function deleteProject(projectId: string): Promise<void> {
+  await apiFetch<void>(`/api/projects/${projectId}`, { method: 'DELETE' });
+}
+
 export async function uploadRepository(projectId: string, file: File): Promise<Project> {
   const formData = new FormData();
   formData.append('file', file);

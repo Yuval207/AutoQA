@@ -10,6 +10,7 @@ import {
   Calendar,
   ExternalLink,
   Search,
+  Trash2,
 } from 'lucide-react';
 
 export const Projects: React.FC = () => {
@@ -31,6 +32,25 @@ export const Projects: React.FC = () => {
   useEffect(() => {
     loadProjects();
   }, []);
+
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const handleDelete = async (e: React.MouseEvent, project: Project) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!window.confirm(`Delete project "${project.name}"? All runs, scenarios and findings will be permanently removed.`)) {
+      return;
+    }
+    setDeletingId(project.id);
+    try {
+      await api.deleteProject(project.id);
+      setProjects((prev) => prev.filter((p) => p.id !== project.id));
+    } catch (err) {
+      alert(`Failed to delete project: ${err instanceof Error ? err.message : err}`);
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   const filteredProjects = projects.filter((p) =>
     p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -107,7 +127,22 @@ export const Projects: React.FC = () => {
                   <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 group-hover:bg-indigo-500 group-hover:text-white transition-all">
                     <FolderGit2 className="w-5 h-5" />
                   </div>
-                  <StatusBadge status={project.status} size="sm" />
+                  <div className="flex items-center gap-2">
+                    <StatusBadge status={project.status} size="sm" />
+                    <button
+                      type="button"
+                      title="Delete project"
+                      onClick={(e) => handleDelete(e, project)}
+                      disabled={deletingId === project.id}
+                      className="p-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                    >
+                      {deletingId === project.id ? (
+                        <span className="block w-4 h-4 border-2 border-red-400 border-t-transparent rounded-full animate-spin" />
+                      ) : (
+                        <Trash2 className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
                 </div>
 
                 <h3 className="text-base font-bold text-white group-hover:text-indigo-300 transition-colors">

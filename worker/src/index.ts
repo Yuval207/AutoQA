@@ -31,6 +31,11 @@ if (!fs.existsSync(logsDir)) {
 const workerLogPath = path.join(logsDir, 'worker.log');
 const appLogPath = path.join(logsDir, 'app-under-test.log');
 
+try {
+  fs.writeFileSync(workerLogPath, '');
+  fs.writeFileSync(appLogPath, '');
+} catch {}
+
 function logToWorkerFile(msg: string) {
   try {
     fs.appendFileSync(workerLogPath, `[${new Date().toISOString()}] ${msg}\n`);

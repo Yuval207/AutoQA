@@ -60,4 +60,12 @@ public class ProjectController {
             @AuthenticationPrincipal User user) {
         return ResponseEntity.ok(projectService.updateEnvironment(projectId, user.getId(), request));
     }
+
+    @DeleteMapping("/{projectId}")
+    public ResponseEntity<Void> deleteProject(
+            @PathVariable UUID projectId,
+            @AuthenticationPrincipal User user) {
+        projectService.deleteProject(projectId, user.getId());
+        return ResponseEntity.noContent().build();
+    }
 }

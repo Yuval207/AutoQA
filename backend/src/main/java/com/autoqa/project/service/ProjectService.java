@@ -12,6 +12,8 @@ import com.autoqa.project.entity.*;
 import com.autoqa.project.repository.*;
 import com.autoqa.repository.service.RepositoryAnalyzer;
 import com.autoqa.testplan.repository.TestScenarioRepository;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -50,6 +52,9 @@ public class ProjectService {
     private final TestScenarioRepository scenarioRepository;
     private final FeatureRepository featureRepository;
     private final FeatureSpecificationRepository specRepository;
+
+    @PersistenceContext
+    private EntityManager entityManager;
 
     @Value("${autoqa.storage.uploads-path}")
     private String uploadsPath;
@@ -256,6 +261,26 @@ public class ProjectService {
         } catch (IOException ignored) {}
 
         return Optional.empty();
+    }
+
+    @Transactional
+    public void deleteProject(UUID projectId, UUID userId) {
+        Project project = getProjectEntity(projectId, userId);
+        // test_executions/bug_findings reference scenarios/executions without CASCADE, so clear runs first
+        entityManager.createNativeQuery("DELETE FROM bug_findings WHERE project_id = :pid")
+                .setParameter("pid", projectId).executeUpdate();
+        entityManager.createNativeQuery("DELETE FROM test_runs WHERE project_id = :pid")
+                .setParameter("pid", projectId).executeUpdate();
+        projectRepository.delete(project);
+        projectRepository.flush();
+
+        for (Path dir : List.of(Paths.get(uploadsPath, projectId.toString()), Paths.get(workspacesPath, projectId.toString()))) {
+            try {
+                if (Files.exists(dir)) deleteRecursive(dir);
+            } catch (IOException e) {
+                log.warn("Failed to remove directory {} for deleted project {}", dir, projectId, e);
+            }
+        }
     }
 
     @Transactional
