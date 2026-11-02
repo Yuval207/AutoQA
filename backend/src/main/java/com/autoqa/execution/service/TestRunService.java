@@ -282,7 +282,9 @@ public class TestRunService {
                 workingDir,
                 envConfig != null ? envConfig.getEnvironmentVariables() : null,
                 testCases,
-                (artifactsPath != null && java.nio.file.Paths.get(artifactsPath).isAbsolute()) ? artifactsPath : "/Users/yuvalsharma/Desktop/AutoQA/data/artifacts"
+                java.nio.file.Paths.get(System.getProperty("user.dir"))
+                        .resolve(artifactsPath != null ? artifactsPath : "./data/artifacts")
+                        .normalize().toAbsolutePath().toString()
 
         ));
     }
@@ -463,24 +465,17 @@ public class TestRunService {
 
         // Dashboard stats
     public DashboardStats getDashboardStats(UUID userId) {
-        var projects = projectService.listProjects(userId);
-        int totalProjects = projects.size();
+        int totalProjects = (int) projectService.countProjects(userId);
+        var runs = testRunRepository.findByProjectUserIdOrderByCreatedAtDesc(userId);
 
-        long totalRuns = 0;
+        long totalRuns = runs.size();
         long totalPassed = 0;
         long totalFailed = 0;
-        String latestStatus = "NONE";
+        String latestStatus = runs.isEmpty() ? "NONE" : runs.get(0).getStatus();
 
-        for (var project : projects) {
-            var runs = testRunRepository.findByProjectIdOrderByCreatedAtDesc(project.id());
-            totalRuns += runs.size();
-            for (var run : runs) {
-                totalPassed += run.getPassedCount();
-                totalFailed += run.getFailedCount();
-            }
-            if (!runs.isEmpty() && "NONE".equals(latestStatus)) {
-                latestStatus = runs.get(0).getStatus();
-            }
+        for (var run : runs) {
+            totalPassed += run.getPassedCount();
+            totalFailed += run.getFailedCount();
         }
 
         double passRate = (totalPassed + totalFailed) > 0

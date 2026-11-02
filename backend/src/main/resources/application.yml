@@ -2,6 +2,9 @@ server:
   port: ${PORT:8081}
 
 spring:
+  config:
+    # Backend runs from backend/, so the project-root .env is one level up
+    import: optional:file:../.env[.properties]
   servlet:
     multipart:
       enabled: true
@@ -13,10 +16,11 @@ spring:
     password: ${SPRING_DATASOURCE_PASSWORD:npg_N9eOgnEqpj4C}
     hikari:
       maximum-pool-size: 10
-      minimum-idle: 2
-      max-lifetime: 60000
-      idle-timeout: 30000
-      keepalive-time: 15000
+      minimum-idle: 5
+      max-lifetime: 1800000
+      idle-timeout: 600000
+      keepalive-time: 60000
+      connection-timeout: 20000
 
   jpa:
     hibernate:

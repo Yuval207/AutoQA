@@ -15,13 +15,20 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 import java.util.Collections;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Component
 public class JwtAuthFilter extends OncePerRequestFilter {
 
+    private static final long USER_CACHE_TTL_MS = 60_000;
+
+    private record CachedUser(User user, long expiresAt) {}
+
     private final JwtProvider jwtProvider;
     private final UserRepository userRepository;
+    private final Map<UUID, CachedUser> userCache = new ConcurrentHashMap<>();
 
     public JwtAuthFilter(JwtProvider jwtProvider, UserRepository userRepository) {
         this.jwtProvider = jwtProvider;
@@ -35,7 +42,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
 
         if (token != null && jwtProvider.validateToken(token)) {
             UUID userId = jwtProvider.getUserIdFromToken(token);
-            User user = userRepository.findById(userId).orElse(null);
+            User user = loadUser(userId);
 
             if (user != null) {
                 UsernamePasswordAuthenticationToken auth =
@@ -46,6 +53,22 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         }
 
         filterChain.doFilter(request, response);
+    }
+
+    // Avoids a remote DB round-trip on every authenticated request
+    private User loadUser(UUID userId) {
+        long now = System.currentTimeMillis();
+        CachedUser cached = userCache.get(userId);
+        if (cached != null && cached.expiresAt() > now) {
+            return cached.user();
+        }
+        User user = userRepository.findById(userId).orElse(null);
+        if (user != null) {
+            userCache.put(userId, new CachedUser(user, now + USER_CACHE_TTL_MS));
+        } else {
+            userCache.remove(userId);
+        }
+        return user;
     }
 
     private String extractToken(HttpServletRequest request) {

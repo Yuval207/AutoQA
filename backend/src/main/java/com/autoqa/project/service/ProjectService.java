@@ -91,13 +91,26 @@ public class ProjectService {
     }
 
     public List<ProjectResponse> listProjects(UUID userId) {
-        return projectRepository.findByUserIdOrderByCreatedAtDesc(userId).stream()
-                .map(p -> {
-                    var repo = repoSourceRepository.findFirstByProjectIdOrderByCreatedAtDesc(p.getId()).orElse(null);
-                    var env = envConfigRepository.findByProjectId(p.getId()).orElse(null);
-                    return toResponse(p, repo, env);
-                })
+        List<Project> projects = projectRepository.findByUserIdOrderByCreatedAtDesc(userId);
+        if (projects.isEmpty()) return List.of();
+
+        List<UUID> ids = projects.stream().map(Project::getId).toList();
+        Map<UUID, RepositorySource> latestRepo = new HashMap<>();
+        for (RepositorySource r : repoSourceRepository.findByProjectIdInOrderByCreatedAtDesc(ids)) {
+            latestRepo.putIfAbsent(r.getProject().getId(), r);
+        }
+        Map<UUID, EnvironmentConfiguration> envs = new HashMap<>();
+        for (EnvironmentConfiguration e : envConfigRepository.findByProjectIdIn(ids)) {
+            envs.put(e.getProject().getId(), e);
+        }
+
+        return projects.stream()
+                .map(p -> toResponse(p, latestRepo.get(p.getId()), envs.get(p.getId())))
                 .collect(Collectors.toList());
+    }
+
+    public long countProjects(UUID userId) {
+        return projectRepository.countByUserId(userId);
     }
 
     public ProjectResponse getProject(UUID projectId, UUID userId) {

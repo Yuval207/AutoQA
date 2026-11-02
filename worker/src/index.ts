@@ -120,10 +120,19 @@ async function waitForHealthCheck(
   return false;
 }
 
+// cmd.exe parentheses don't scope `cd`, so "(cd a && x) && (cd b && y)" breaks on Windows
+function toPlatformCommand(command: string): string {
+  if (process.platform !== 'win32') return command;
+  return command.replace(
+    /\(\s*cd\s+("[^"]+"|[^\s&()]+)\s*&&\s*([^()]*?)\s*\)/g,
+    (_m, dir, rest) => `(pushd ${dir} && ${rest} && popd)`
+  );
+}
+
 async function runCommand(command: string, cwd: string): Promise<{ success: boolean; output: string }> {
   return new Promise((resolve) => {
     let output = '';
-    const child = spawn(command, {
+    const child = spawn(toPlatformCommand(command), {
       cwd,
       shell: true,
       env: { ...process.env, CI: 'true', BROWSER: 'none' },
@@ -225,7 +234,7 @@ function startApplication(
     fs.appendFileSync(appLogPath, startBanner);
   } catch {}
 
-  const child = spawn(effectiveCommand, {
+  const child = spawn(toPlatformCommand(effectiveCommand), {
     cwd,
     shell: true,
     detached: process.platform !== 'win32',

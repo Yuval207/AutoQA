@@ -17,15 +17,13 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(api.getStoredUser());
   const [token, setToken] = useState<string | null>(api.getStoredToken());
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(() => !!api.getStoredToken() && !api.getStoredUser());
 
   useEffect(() => {
     const init = async () => {
       const storedToken = api.getStoredToken();
-      const storedUser = api.getStoredUser();
       if (storedToken) {
-        setToken(storedToken);
-        if (storedUser) setUser(storedUser);
+        // Render immediately from cached user; refresh profile in the background
         try {
           const me = await api.getMe();
           if (me) setUser(me);
