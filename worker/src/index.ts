@@ -162,6 +162,47 @@ function isViteProject(dir: string): boolean {
   }
 }
 
+// Static servers (serve, http-server, python -m http.server...) take the port as a CLI arg and ignore PORT,
+// so when the configured port is reassigned the hard-coded value in the command must follow
+function remapCommandPort(command: string, fromPort: number, toPort: number): string {
+  if (fromPort === toPort) return command;
+  return command.replace(new RegExp(`(?<![\\d.])${fromPort}(?!\\d)`, 'g'), String(toPort));
+}
+
+// Turns raw startup logs into a specific reason instead of a generic "did not start" message
+function describeStartupFailure(rawLogs: string, expectedPort: number, healthUrl: string, stillRunning: boolean): string {
+  const logs = rawLogs.replace(/\x1b\[[0-9;]*m/g, '');
+  const firstMatch = (re: RegExp) => logs.match(re)?.[0]?.trim().slice(0, 200);
+
+  const listenedPorts = [...logs.matchAll(/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::\]):(\d{2,5})/g)]
+    .map((m) => Number(m[1]))
+    .filter((p) => p !== expectedPort);
+  if (listenedPorts.length > 0 && !logs.includes(`:${expectedPort}`)) {
+    return `App started on port ${listenedPorts[0]}, but AutoQA was waiting on port ${expectedPort} (${healthUrl}). ` +
+      `The startup command hard-codes its port or ignores the PORT env variable; make it listen on $PORT / the project's configured port.`;
+  }
+
+  const addrInUse = firstMatch(/EADDRINUSE[^\n]*/);
+  if (addrInUse) return `App could not bind its port: ${addrInUse}`;
+
+  const missingModule = firstMatch(/(?:Cannot find module|Cannot find package|ERR_MODULE_NOT_FOUND)[^\n]*/);
+  if (missingModule) return `App crashed on startup: ${missingModule}. Dependencies are missing or the install command did not run.`;
+
+  const notRecognized = firstMatch(/'[^']+' is not recognized as an internal or external command|command not found[^\n]*/);
+  if (notRecognized) return `Startup command failed: ${notRecognized}`;
+
+  const exitMatch = logs.match(/\[Process Exited\][^\n]*code=(\d+)/);
+  if (!stillRunning || exitMatch) {
+    const errorLine = firstMatch(/^.*(?:Error|error|ERR!)[^\n]*/m);
+    return `App process exited before becoming healthy${exitMatch ? ` (exit code ${exitMatch[1]})` : ''}${errorLine ? `: ${errorLine}` : ''}.`;
+  }
+
+  if (!logs.trim()) {
+    return `App produced no output and never responded on ${healthUrl} within the startup timeout.`;
+  }
+  return `App is running but never responded on ${healthUrl} within the startup timeout. Check the health check path and port.`;
+}
+
 // Vite ignores PORT and silently shifts to another port when busy, so pin it explicitly
 function pinVitePort(command: string, cwd: string, port: number): string {
   const addFlags = (cmd: string) =>
@@ -563,8 +604,10 @@ async function processJob(job: WorkerJob): Promise<void> {
       appPort = freePort;
     }
     let appUrl = `http://localhost:${appPort}`;
+    let effectiveStartupCommand = job.startupCommand;
     if (job.startupCommand) {
-      const startupCommand = pinVitePort(job.startupCommand, workDir, appPort);
+      const startupCommand = pinVitePort(remapCommandPort(job.startupCommand, job.port, appPort), workDir, appPort);
+      effectiveStartupCommand = startupCommand;
       console.log(`[Worker] Starting application with command: ${startupCommand}`);
       await updateRunStatus(job.runId, 'STARTING_ENVIRONMENT', undefined, 'Starting application server...');
 
@@ -593,7 +636,7 @@ async function processJob(job: WorkerJob): Promise<void> {
         await updateRunStatus(
           job.runId,
           'FAILED',
-          'Application did not start within the expected timeout',
+          describeStartupFailure(logs, appPort, healthUrl, started.isAlive()),
           logs.substring(0, 5000)
         );
         return;
@@ -605,7 +648,7 @@ async function processJob(job: WorkerJob): Promise<void> {
     console.log(`[Worker] Application ready at ${appUrl}. Launching Playwright browser...`);
 
     // Fullstack profiles start the backend with an inline PORT=xxxx; API scenarios must hit that, not the UI
-    const backendPortMatch = job.startupCommand?.match(/\bPORT=(\d+)/);
+    const backendPortMatch = effectiveStartupCommand?.match(/\bPORT=(\d+)/);
     const apiBaseUrl = backendPortMatch && Number(backendPortMatch[1]) !== appPort
       ? `http://localhost:${backendPortMatch[1]}`
       : appUrl;
@@ -755,11 +798,7 @@ async function processJob(job: WorkerJob): Promise<void> {
           evidenceRefs: `${testCase.executionId}_step_${failedStepIndex}.png`,
           consoleErrors: !isApi && consoleLogs.length > 0 ? JSON.stringify(consoleLogs) : null,
           networkErrors: networkErrors.length > 0 ? JSON.stringify(networkErrors) : null,
-          rootCauseHypothesis: isApi
-            ? 'Backend handler threw an unhandled error or the server is unreachable'
-            : failureErrorMessage?.includes('Timeout')
-            ? 'Element not found or page took longer than expected to render'
-            : 'Assertion value did not match expected application state',
+          rootCauseHypothesis: await executor.diagnoseFailure(failureErrorMessage),
           groupKey: `${testCase.featureName}:${failedAction.type}:${failedAction.target || ''}`,
         };
 

@@ -12,6 +12,9 @@ export class ActionExecutor {
   private consoleLogs: string[] = [];
   private networkErrors: Array<{ url: string; status: number; method: string }> = [];
   private lastApiResponse: { status: number; body: string } | null = null;
+  private lastApiRequest: string | null = null;
+  private lastNavigation: { target: string; requestedUrl: string; status: number | null } | null = null;
+  private lastActivity: 'api' | 'navigation' | null = null;
 
   constructor(page: Page, baseUrl: string, artifactsDir: string, runId: string, apiBaseUrl?: string) {
     this.page = page;
@@ -62,7 +65,10 @@ export class ActionExecutor {
       switch (action.type) {
         case 'NAVIGATE': {
           const url = this.resolveUrl(action.target || '/');
-          await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          this.lastActivity = 'navigation';
+          this.lastNavigation = { target: action.target || '/', requestedUrl: url, status: null };
+          const response = await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          this.lastNavigation.status = response?.status() ?? null;
           // Dev servers keep HMR/polling connections open, so don't block long on networkidle
           await this.page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
           await this.captureScreenshot(screenshotPath);
@@ -137,8 +143,7 @@ export class ActionExecutor {
           }
 
           if (!isVisible) {
-            await this.captureScreenshot(screenshotPath);
-            return this.failStep(stepIndex, action, startTime, screenshotName,
+            return this.failWithEvidence(stepIndex, action, startTime, screenshotPath, screenshotName,
               `Expected text "${textToFind}" to be visible`,
               `Text "${textToFind}" was not found on the page`);
           }
@@ -149,10 +154,9 @@ export class ActionExecutor {
           const locatorTarget = this.resolveLocator(action.target || '');
           const visible = await locatorTarget.isVisible({ timeout: 10000 }).catch(() => false);
           if (!visible) {
-            await this.captureScreenshot(screenshotPath);
-            return this.failStep(stepIndex, action, startTime, screenshotName,
+            return this.failWithEvidence(stepIndex, action, startTime, screenshotPath, screenshotName,
               `Expected "${action.target}" to be visible`,
-              `Element was not found or not visible`);
+              `Element "${action.target}" was not found or not visible`);
           }
           return this.successStep(stepIndex, action, startTime, null);
         }
@@ -162,8 +166,7 @@ export class ActionExecutor {
           const currentUrl = this.page.url();
           const matches = currentUrl.includes(expectedUrl) || new URL(currentUrl).pathname === expectedUrl;
           if (!matches) {
-            await this.captureScreenshot(screenshotPath);
-            return this.failStep(stepIndex, action, startTime, screenshotName,
+            return this.failWithEvidence(stepIndex, action, startTime, screenshotPath, screenshotName,
               `Expected URL to contain "${expectedUrl}"`,
               `Current URL: ${currentUrl}`);
           }
@@ -189,6 +192,8 @@ export class ActionExecutor {
           const status = res.status();
           const body = await res.text().catch(() => '');
           this.lastApiResponse = { status, body };
+          this.lastApiRequest = `${method} ${url}`;
+          this.lastActivity = 'api';
 
           // Render the HTTP exchange so the screenshot shows this endpoint's actual response
           await this.page.setContent(renderApiResponse(method, url, status, res.headers()['content-type'] || '', body));
@@ -240,7 +245,14 @@ export class ActionExecutor {
           };
       }
     } catch (error: any) {
-      await this.captureScreenshot(screenshotPath).catch(() => {});
+      const errorMessage = error.message || String(error);
+      const cause = await this.diagnoseFailure(errorMessage);
+      await this.captureFailureScreenshot(
+        screenshotPath,
+        `${action.type} ${action.target || ''} ${action.value || ''}`.trim(),
+        errorMessage.split('\n')[0],
+        cause
+      );
       return {
         stepIndex,
         actionType: action.type,
@@ -248,8 +260,8 @@ export class ActionExecutor {
         actionValue: action.value || null,
         status: 'ERROR',
         expectedValue: null,
-        actualValue: null,
-        errorMessage: error.message || String(error),
+        actualValue: cause,
+        errorMessage,
         screenshotPath: screenshotName,
         consoleLogs: this.consoleLogs.length > 0 ? JSON.stringify(this.consoleLogs.slice(-20)) : null,
         networkErrors: this.networkErrors.length > 0 ? JSON.stringify(this.networkErrors.slice(-10)) : null,
@@ -291,7 +303,8 @@ export class ActionExecutor {
             durationMs: Date.now() - startTime,
           });
         } else {
-          await this.captureScreenshot(screenshotPath);
+          const cause = await this.diagnoseFailure(`Expected: ${outcome.description}`);
+          await this.captureFailureScreenshot(screenshotPath, outcome.description, 'Expected outcome not observed', cause);
           results.push({
             stepIndex,
             actionType: 'ASSERTION',
@@ -299,7 +312,7 @@ export class ActionExecutor {
             actionValue: null,
             status: 'FAILED',
             expectedValue: outcome.description,
-            actualValue: 'Assertion failed - expected outcome not observed',
+            actualValue: cause,
             errorMessage: `Expected: ${outcome.description}`,
             screenshotPath: screenshotName,
             consoleLogs: this.consoleLogs.length > 0 ? JSON.stringify(this.consoleLogs.slice(-20)) : null,
@@ -308,7 +321,9 @@ export class ActionExecutor {
           });
         }
       } catch (error: any) {
-        await this.captureScreenshot(screenshotPath).catch(() => {});
+        const errorMessage = error.message || String(error);
+        const cause = await this.diagnoseFailure(errorMessage);
+        await this.captureFailureScreenshot(screenshotPath, outcome.description, errorMessage.split('\n')[0], cause);
         results.push({
           stepIndex,
           actionType: 'ASSERTION',
@@ -316,8 +331,8 @@ export class ActionExecutor {
           actionValue: null,
           status: 'ERROR',
           expectedValue: outcome.description,
-          actualValue: null,
-          errorMessage: error.message || String(error),
+          actualValue: cause,
+          errorMessage,
           screenshotPath: screenshotName,
           consoleLogs: null,
           networkErrors: null,
@@ -559,12 +574,141 @@ export class ActionExecutor {
     }
   }
 
+  private async failWithEvidence(stepIndex: number, action: TestAction, startTime: number, screenshotPath: string,
+    screenshotName: string, expected: string, actual: string): Promise<StepResult> {
+    const cause = await this.diagnoseFailure(actual);
+    await this.captureFailureScreenshot(screenshotPath, expected, actual, cause);
+    return { ...this.failStep(stepIndex, action, startTime, screenshotName, expected, actual), actualValue: `${actual}. ${cause}` };
+  }
+
+  /**
+   * Builds a failure-specific explanation from what was actually observed
+   * (API response, redirects, HTTP status, JS errors, failed requests, page contents).
+   */
+  async diagnoseFailure(errorMessage: string | null): Promise<string> {
+    const message = errorMessage || '';
+
+    if (/ECONNREFUSED|ERR_CONNECTION_REFUSED/i.test(message)) {
+      const host = this.lastActivity === 'api' ? this.apiBaseUrl : this.baseUrl;
+      return `Connection refused: nothing is listening on ${host}. The app/backend is not running or crashed.`;
+    }
+
+    if (this.lastActivity === 'api' && this.lastApiResponse) {
+      const { status, body } = this.lastApiResponse;
+      const snippet = body.replace(/\s+/g, ' ').trim().slice(0, 200) || '(empty body)';
+      if (status >= 500) return `Backend returned HTTP ${status} (server error). Response: ${snippet}`;
+      return `Backend returned HTTP ${status}, but the response did not match the expectation. Response: ${snippet}`;
+    }
+
+    const currentUrl = this.page.url();
+    const nav = this.lastNavigation;
+    if (nav) {
+      const routeParam = nav.target.match(/\/:([A-Za-z_]\w*)/);
+      if (routeParam) {
+        return `Route parameter ":${routeParam[1]}" was never filled in. The test opened the literal URL "${nav.target}", which is not a real page in the app.`;
+      }
+
+      const requestedPath = safePathname(nav.requestedUrl);
+      const finalPath = safePathname(currentUrl);
+      if (nav.status !== null && nav.status >= 400) {
+        return `Server responded HTTP ${nav.status} for ${requestedPath}, so the page never loaded.`;
+      }
+      if (finalPath !== null && requestedPath !== null && finalPath !== requestedPath) {
+        if (/login|signin|sign-in|auth/i.test(finalPath)) {
+          return `${requestedPath} redirected to ${finalPath}: the page is protected by login and the test ran without an authenticated session.`;
+        }
+        return `${requestedPath} redirected to ${finalPath}, so the expected content was never shown.`;
+      }
+    }
+
+    const pageError = this.consoleLogs.find((l) => l.startsWith('[page-error]'));
+    if (pageError) {
+      return `The page threw an uncaught JavaScript error: ${pageError.replace('[page-error] ', '').slice(0, 200)}`;
+    }
+
+    const networkError = this.networkErrors.find((e) => e.status >= 500) || this.networkErrors[0];
+    if (networkError) {
+      return `${networkError.method} ${networkError.url} failed with HTTP ${networkError.status} while the page was loading.`;
+    }
+
+    if (/timeout/i.test(message)) {
+      return `${message.split('\n')[0]} (on ${currentUrl}). The target element never appeared on this page.`;
+    }
+
+    const bodyText = (await this.page.innerText('body').catch(() => '')).trim();
+    if (!bodyText) {
+      return `Page ${currentUrl} rendered blank: no route matched or the app failed to render.`;
+    }
+
+    const title = await this.page.title().catch(() => '');
+    const heading = (await this.page.locator('h1, h2').first().innerText({ timeout: 1000 }).catch(() => '')).trim();
+    const shown = heading || title || bodyText.slice(0, 80);
+    return `Page ${currentUrl} loaded and shows "${shown.replace(/\s+/g, ' ').slice(0, 80)}", but the expected content was not on it.`;
+  }
+
+  /**
+   * Viewport screenshot with a banner explaining the failure, so the image is self-explanatory.
+   */
+  private async captureFailureScreenshot(filePath: string, expected: string, actual: string, cause: string): Promise<void> {
+    const nav = this.lastNavigation;
+    const lines = [
+      'AUTOQA: STEP FAILED',
+      `Expected : ${expected}`,
+      `Actual   : ${actual}`,
+      this.lastActivity === 'navigation' && nav
+        ? `Opened   : ${nav.target}  ->  Now on: ${this.page.url()}${nav.status !== null ? `  (HTTP ${nav.status})` : ''}`
+        : this.lastActivity === 'api' && this.lastApiRequest
+        ? `Request  : ${this.lastApiRequest}${this.lastApiResponse ? `  ->  HTTP ${this.lastApiResponse.status}` : ''}`
+        : `URL      : ${this.page.url()}`,
+      `Cause    : ${cause}`,
+    ];
+
+    let shot: Buffer;
+    try {
+      shot = await this.page.screenshot({ fullPage: false });
+    } catch (e) {
+      console.error('Screenshot capture failed:', e);
+      return;
+    }
+
+    // Compose banner + screenshot on a separate page so the app's own content is never covered or altered
+    const composer = await this.page.context().newPage()
+      .catch(() => this.page.context().browser()?.newPage() ?? null)
+      .catch(() => null);
+    if (!composer) {
+      fs.writeFileSync(filePath, shot);
+      return;
+    }
+    try {
+      await composer.setViewportSize(this.page.viewportSize() || { width: 1280, height: 720 });
+      await composer.setContent(`<!doctype html><html><body style="margin:0;background:#0f172a">
+  <div style="background:#b91c1c;color:#fff;font:13px/1.5 ui-monospace,Consolas,monospace;padding:12px 16px;white-space:pre-wrap;word-break:break-word;border-bottom:3px solid #fecaca">${escapeHtml(lines.join('\n'))}</div>
+  <img style="display:block;width:100%" src="data:image/png;base64,${shot.toString('base64')}">
+</body></html>`);
+      await composer.screenshot({ path: filePath, fullPage: true });
+    } catch (e) {
+      console.error('Failure screenshot composition failed:', e);
+      fs.writeFileSync(filePath, shot);
+    } finally {
+      await composer.close().catch(() => {});
+    }
+  }
+
   getConsoleLogs(): string[] {
     return [...this.consoleLogs];
   }
 
   getNetworkErrors(): Array<{ url: string; status: number; method: string }> {
     return [...this.networkErrors];
+  }
+}
+
+function safePathname(url: string): string | null {
+  try {
+    const pathname = new URL(url).pathname;
+    return pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname;
+  } catch {
+    return null;
   }
 }
 
