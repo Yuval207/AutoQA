@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useParams, Link } from 'react-router-dom';
 import * as api from '../api/client';
 import {
@@ -554,10 +555,10 @@ export const TestRunDetail: React.FC = () => {
         </div>
       </div>
 
-      {/* Screenshot Preview Modal */}
-      {selectedScreenshot && (
+      {/* Screenshot Preview Modal (portaled so the backdrop covers the whole viewport, including the navbar) */}
+      {selectedScreenshot && createPortal(
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#080c14]/75 backdrop-blur-md"
           onClick={() => setSelectedScreenshot(null)}
         >
           <div
@@ -587,9 +588,9 @@ export const TestRunDetail: React.FC = () => {
                 </button>
               </div>
             </div>
-            <div className="p-4 max-h-[80vh] min-h-[200px] overflow-auto flex flex-col items-center justify-center bg-black/50">
+            <div className="max-h-[80vh] min-h-[200px] overflow-auto bg-slate-900 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               {imageError ? (
-                <div className="text-center p-6 max-w-md">
+                <div className="min-h-[200px] flex flex-col items-center justify-center text-center p-6">
                   <AlertTriangle className="w-8 h-8 text-amber-400 mx-auto mb-2" />
                   <h4 className="text-sm font-semibold text-white">Screenshot not found</h4>
                   <p className="text-xs text-slate-400 mt-1">
@@ -600,13 +601,14 @@ export const TestRunDetail: React.FC = () => {
                 <img
                   src={selectedScreenshot}
                   alt="Test Evidence Screenshot"
-                  className="rounded-lg shadow-lg max-w-full h-auto border border-slate-800"
+                  className="block w-full h-auto"
                   onError={() => setImageError(true)}
                 />
               )}
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
