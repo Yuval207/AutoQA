@@ -24,7 +24,7 @@ export interface TestCase {
 }
 
 export interface TestAction {
-  type: 'NAVIGATE' | 'CLICK' | 'FILL' | 'SELECT' | 'CHECK' | 'UNCHECK' | 'SUBMIT' | 'ASSERT_TEXT' | 'ASSERT_VISIBLE' | 'ASSERT_URL' | 'SCREENSHOT' | 'CUSTOM';
+  type: 'NAVIGATE' | 'CLICK' | 'FILL' | 'SELECT' | 'CHECK' | 'UNCHECK' | 'SUBMIT' | 'ASSERT_TEXT' | 'ASSERT_VISIBLE' | 'ASSERT_URL' | 'SCREENSHOT' | 'API_REQUEST' | 'CUSTOM';
   target?: string;
   value?: string;
   description?: string;

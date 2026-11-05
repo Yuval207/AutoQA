@@ -6,14 +6,17 @@ import * as path from 'path';
 export class ActionExecutor {
   private page: Page;
   private baseUrl: string;
+  private apiBaseUrl: string;
   private artifactsDir: string;
   private runId: string;
   private consoleLogs: string[] = [];
   private networkErrors: Array<{ url: string; status: number; method: string }> = [];
+  private lastApiResponse: { status: number; body: string } | null = null;
 
-  constructor(page: Page, baseUrl: string, artifactsDir: string, runId: string) {
+  constructor(page: Page, baseUrl: string, artifactsDir: string, runId: string, apiBaseUrl?: string) {
     this.page = page;
     this.baseUrl = baseUrl;
+    this.apiBaseUrl = apiBaseUrl || baseUrl;
     this.artifactsDir = artifactsDir;
     this.runId = runId;
 
@@ -59,7 +62,9 @@ export class ActionExecutor {
       switch (action.type) {
         case 'NAVIGATE': {
           const url = this.resolveUrl(action.target || '/');
-          await this.page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+          await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          // Dev servers keep HMR/polling connections open, so don't block long on networkidle
+          await this.page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
           await this.captureScreenshot(screenshotPath);
           return this.successStep(stepIndex, action, startTime, screenshotName);
         }
@@ -67,7 +72,7 @@ export class ActionExecutor {
         case 'CLICK': {
           const locator = this.resolveLocator(action.target || '');
           await locator.first().click({ timeout: 10000 });
-          await this.page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+          await this.page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
           await this.captureScreenshot(screenshotPath);
           return this.successStep(stepIndex, action, startTime, screenshotName);
         }
@@ -105,7 +110,7 @@ export class ActionExecutor {
             const submitLocator = this.resolveLocator(submitTarget);
             await submitLocator.click({ timeout: 10000 });
           }
-          await this.page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+          await this.page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
           await this.captureScreenshot(screenshotPath);
           return this.successStep(stepIndex, action, startTime, screenshotName);
         }
@@ -168,6 +173,36 @@ export class ActionExecutor {
         case 'SCREENSHOT': {
           await this.captureScreenshot(screenshotPath);
           return this.successStep(stepIndex, action, startTime, screenshotName);
+        }
+
+        case 'API_REQUEST': {
+          const method = (action.value || 'GET').toUpperCase();
+          const target = action.target || '/';
+          const url = `${this.apiBaseUrl.replace(/\/+$/, '')}${target.startsWith('/') ? target : `/${target}`}`;
+          const res = await this.page.request.fetch(url, {
+            method,
+            failOnStatusCode: false,
+            maxRedirects: 0,
+            timeout: 15000,
+            ...(method === 'GET' || method === 'DELETE' ? {} : { data: {} }),
+          });
+          const status = res.status();
+          const body = await res.text().catch(() => '');
+          this.lastApiResponse = { status, body };
+
+          // Render the HTTP exchange so the screenshot shows this endpoint's actual response
+          await this.page.setContent(renderApiResponse(method, url, status, res.headers()['content-type'] || '', body));
+          await this.captureScreenshot(screenshotPath);
+
+          if (status >= 500) {
+            return this.failStep(stepIndex, action, startTime, screenshotName,
+              `${method} ${target} should respond without a server error`,
+              `HTTP ${status}: ${body.slice(0, 300) || '(empty body)'}`);
+          }
+          return {
+            ...this.successStep(stepIndex, action, startTime, screenshotName),
+            actualValue: `HTTP ${status}`,
+          };
         }
 
         case 'CUSTOM': {
@@ -298,6 +333,21 @@ export class ActionExecutor {
     const trimmed = description.trim();
     const lower = trimmed.toLowerCase();
 
+    const statusMatch = lower.match(/^status\s*(<=|>=|<|>|==|=)\s*(\d{3})$/);
+    if (statusMatch && this.lastApiResponse) {
+      const actual = this.lastApiResponse.status;
+      const expected = Number(statusMatch[2]);
+      switch (statusMatch[1]) {
+        case '<': return actual < expected;
+        case '<=': return actual <= expected;
+        case '>': return actual > expected;
+        case '>=': return actual >= expected;
+        default: return actual === expected;
+      }
+    }
+    if (this.lastApiResponse) {
+      return this.lastApiResponse.body.toLowerCase().includes(lower);
+    }
     // 1. Direct text check: is the exact expected phrase visible on the page?
     try {
       const isDirectlyVisible = await this.page
@@ -516,4 +566,25 @@ export class ActionExecutor {
   getNetworkErrors(): Array<{ url: string; status: number; method: string }> {
     return [...this.networkErrors];
   }
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function renderApiResponse(method: string, url: string, status: number, contentType: string, body: string): string {
+  let pretty = body;
+  try {
+    pretty = JSON.stringify(JSON.parse(body), null, 2);
+  } catch {}
+  if (pretty.length > 4000) pretty = `${pretty.slice(0, 4000)}\n... (truncated)`;
+  const color = status >= 500 ? '#f43f5e' : status >= 400 ? '#f59e0b' : '#10b981';
+  return `<!doctype html><html><body style="margin:0;background:#0f172a;color:#e2e8f0;font-family:ui-monospace,Consolas,monospace;padding:32px">
+  <div style="font-size:13px;color:#94a3b8;margin-bottom:8px">API REQUEST</div>
+  <div style="font-size:20px;margin-bottom:20px"><b>${escapeHtml(method)}</b> ${escapeHtml(url)}</div>
+  <div style="font-size:13px;color:#94a3b8;margin-bottom:8px">RESPONSE</div>
+  <div style="font-size:28px;font-weight:bold;color:${color};margin-bottom:6px">HTTP ${status}</div>
+  <div style="font-size:12px;color:#64748b;margin-bottom:16px">${escapeHtml(contentType || 'no content-type')}</div>
+  <pre style="background:#020617;border:1px solid #1e293b;border-radius:8px;padding:16px;white-space:pre-wrap;word-break:break-all;font-size:13px">${escapeHtml(pretty || '(empty body)')}</pre>
+</body></html>`;
 }

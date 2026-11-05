@@ -19,6 +19,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -286,14 +288,27 @@ public class ProjectService {
                 .setParameter("pid", projectId).executeUpdate();
         projectRepository.delete(project);
         projectRepository.flush();
+        log.info("Deleted project {} from database", projectId);
 
-        for (Path dir : List.of(Paths.get(uploadsPath, projectId.toString()), Paths.get(workspacesPath, projectId.toString()))) {
-            try {
-                if (Files.exists(dir)) deleteRecursive(dir);
-            } catch (IOException e) {
-                log.warn("Failed to remove directory {} for deleted project {}", dir, projectId, e);
+        // Workspaces contain node_modules (tens of thousands of files), so remove them off the request thread
+        List<Path> dirs = List.of(Paths.get(uploadsPath, projectId.toString()), Paths.get(workspacesPath, projectId.toString()));
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                Thread cleanup = new Thread(() -> {
+                    for (Path dir : dirs) {
+                        try {
+                            if (Files.exists(dir)) deleteRecursive(dir);
+                        } catch (IOException e) {
+                            log.warn("Failed to remove directory {} for deleted project {}", dir, projectId, e);
+                        }
+                    }
+                    log.info("Cleaned up files for deleted project {}", projectId);
+                }, "project-cleanup-" + projectId);
+                cleanup.setDaemon(true);
+                cleanup.start();
             }
-        }
+        });
     }
 
     @Transactional

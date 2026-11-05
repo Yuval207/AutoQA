@@ -51,6 +51,26 @@ export const TestRunDetail: React.FC = () => {
     return cleaned ? [cleaned] : [];
   };
 
+  const parseList = (raw: string | null | undefined): string[] => {
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.map((s) => String(s).trim()).filter(Boolean);
+      if (typeof parsed === 'string') return [parsed.trim()].filter(Boolean);
+    } catch {}
+    return raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  };
+
+  const stepLabel = (ref: string) => {
+    const m = ref.match(/_step_(\d+)\./);
+    return m ? `Step ${m[1]}` : 'Screenshot';
+  };
+
+  const openScreenshot = (url: string) => {
+    setImageError(false);
+    setSelectedScreenshot(url);
+  };
+
   const loadData = async (silent = false) => {
     if (!runId) return;
     if (!silent) setRefreshing(true);
@@ -257,110 +277,150 @@ export const TestRunDetail: React.FC = () => {
               <Bug className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-lg font-bold text-white">
-                Discovered Defects & Bug Reports ({findings.length})
-              </h2>
-              <p className="text-xs text-slate-400">
-                Actionable findings with reproduction steps, console traces, and evidence screenshots
-              </p>
+              <h2 className="text-lg font-bold text-white">Bugs Found ({findings.length})</h2>
             </div>
           </div>
 
-          <div className="space-y-5">
-            {findings.map((bug) => (
-              <div
-                key={bug.id}
-                className="bg-slate-900/60 backdrop-blur-xl border border-rose-500/30 rounded-2xl p-6 shadow-xl relative overflow-hidden"
-              >
-                <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-rose-500 to-amber-500" />
+          <div className="space-y-4">
+            {findings.map((bug) => {
+              const steps = parseList(bug.reproductionSteps).map((s) => s.replace(/^\d+\.\s*/, ''));
+              const evidence = parseEvidenceRefs(bug.evidenceRefs);
+              const consoleLines = parseList(bug.consoleErrors);
+              const consoleErrorCount = consoleLines.filter((l) => /^\[(error|pageerror)\]/i.test(l)).length;
 
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-                  <div>
-                    <div className="flex items-center gap-2.5">
-                      <h3 className="text-base font-bold text-white">{bug.title}</h3>
+              return (
+                <div
+                  key={bug.id}
+                  className="bg-slate-900/60 border border-slate-800 border-l-4 border-l-rose-500 rounded-xl p-5"
+                >
+                  {/* Header */}
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h3 className="text-sm font-bold text-white">{bug.title}</h3>
+                      <div className="text-xs text-slate-400 mt-1">
+                        {bug.featureName} <span className="text-slate-600">›</span> {bug.scenarioName}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-[10px] font-mono text-slate-400 px-2 py-0.5 rounded bg-slate-800">
+                        {bug.category}
+                      </span>
                       <StatusBadge status={bug.severity} size="sm" />
                     </div>
-                    <div className="text-xs text-slate-400 mt-1 flex items-center gap-2">
-                      <span className="font-semibold text-rose-300">Category: {bug.category}</span>
-                      <span>•</span>
-                      <span>Feature: {bug.featureName}</span>
-                      <span>•</span>
-                      <span>Scenario: {bug.scenarioName}</span>
+                  </div>
+
+                  {/* Expected vs actual */}
+                  <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                    <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/20 p-3">
+                      <div className="flex items-center gap-1.5 text-emerald-400 font-semibold mb-1">
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Expected
+                      </div>
+                      <p className="font-mono text-slate-200 break-words">
+                        {bug.expectedBehaviour || 'Assertion should pass'}
+                      </p>
+                    </div>
+                    <div className="rounded-lg bg-rose-500/5 border border-rose-500/20 p-3">
+                      <div className="flex items-center gap-1.5 text-rose-400 font-semibold mb-1">
+                        <XCircle className="w-3.5 h-3.5" /> Actual
+                      </div>
+                      <p className="font-mono text-slate-200 break-words">
+                        {bug.actualBehaviour || bug.description}
+                      </p>
                     </div>
                   </div>
-                </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 my-4">
-                  <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800">
-                    <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">
-                      Expected Behavior
-                    </span>
-                    <p className="text-xs text-emerald-300 font-mono">
-                      {bug.expectedBehaviour || 'Expected assertion to pass'}
+                  {/* Steps + evidence */}
+                  <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {steps.length > 0 && (
+                      <div>
+                        <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-2">
+                          Steps to reproduce
+                        </div>
+                        <ol className="space-y-1.5 text-xs">
+                          {steps.map((s, i) => (
+                            <li key={i} className="flex gap-2">
+                              <span className="w-5 h-5 shrink-0 rounded-full bg-slate-800 text-slate-300 text-[10px] font-bold flex items-center justify-center">
+                                {i + 1}
+                              </span>
+                              <span className="font-mono text-slate-300 pt-0.5 break-all">{s}</span>
+                            </li>
+                          ))}
+                        </ol>
+                        {bug.rootCauseHypothesis && (
+                          <p className="mt-3 text-xs text-slate-400">
+                            <span className="text-indigo-300 font-semibold">Likely cause: </span>
+                            {bug.rootCauseHypothesis}
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {evidence.length > 0 && (
+                      <div>
+                        <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-2">
+                          Screenshot
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {evidence.map((ref) => (
+                            <button
+                              key={ref}
+                              onClick={() => openScreenshot(api.getArtifactUrl(run.id, ref))}
+                              className="group relative w-48 aspect-video rounded-lg overflow-hidden border border-slate-700 hover:border-indigo-500 bg-slate-950"
+                              title={ref}
+                            >
+                              <img
+                                src={api.getArtifactUrl(run.id, ref)}
+                                alt={stepLabel(ref)}
+                                loading="lazy"
+                                className="w-full h-full object-cover object-top"
+                                onError={(e) => (e.currentTarget.style.visibility = 'hidden')}
+                              />
+                              <div className="absolute inset-x-0 bottom-0 px-2 py-1 bg-black/70 text-[10px] text-slate-200 flex items-center justify-between">
+                                <span>{stepLabel(ref)}</span>
+                                <Maximize2 className="w-3 h-3 opacity-70 group-hover:opacity-100" />
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {steps.length === 0 && bug.rootCauseHypothesis && (
+                    <p className="mt-3 text-xs text-slate-400">
+                      <span className="text-indigo-300 font-semibold">Likely cause: </span>
+                      {bug.rootCauseHypothesis}
                     </p>
-                  </div>
+                  )}
 
-                  <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800">
-                    <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">
-                      Actual Behavior / Error
-                    </span>
-                    <p className="text-xs text-rose-300 font-mono">
-                      {bug.actualBehaviour || bug.description}
-                    </p>
-                  </div>
+                  {/* Console output (collapsed) */}
+                  {consoleLines.length > 0 && (
+                    <details className="mt-4 group">
+                      <summary className="cursor-pointer select-none text-xs text-slate-400 hover:text-slate-200 flex items-center gap-1.5">
+                        <Terminal className="w-3.5 h-3.5" />
+                        <span>
+                          Browser console ({consoleLines.length} {consoleLines.length === 1 ? 'entry' : 'entries'}
+                          {consoleErrorCount > 0 ? `, ${consoleErrorCount} errors` : ''})
+                        </span>
+                      </summary>
+                      <ul className="mt-2 space-y-1 bg-black/40 rounded-lg p-3 border border-slate-800 font-mono text-[11px] max-h-60 overflow-auto">
+                        {consoleLines.map((line, i) => {
+                          const isError = /^\[(error|pageerror)\]/i.test(line);
+                          return (
+                            <li
+                              key={i}
+                              className={`whitespace-pre-wrap break-words ${isError ? 'text-rose-300' : 'text-amber-200/80'}`}
+                            >
+                              {line}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </details>
+                  )}
                 </div>
-
-                {bug.reproductionSteps && (
-                  <div className="mt-3 bg-slate-950/60 rounded-xl p-3.5 border border-slate-800">
-                    <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block mb-2">
-                      Reproduction Sequence
-                    </span>
-                    <pre className="text-xs font-mono text-slate-300 whitespace-pre-wrap leading-relaxed">
-                      {bug.reproductionSteps}
-                    </pre>
-                  </div>
-                )}
-
-                {bug.rootCauseHypothesis && (
-                  <div className="mt-3 p-3 rounded-xl bg-indigo-950/30 border border-indigo-500/20 text-xs text-indigo-300">
-                    <span className="font-bold">Root Cause Diagnostic: </span>
-                    <span>{bug.rootCauseHypothesis}</span>
-                  </div>
-                )}
-
-                {/* Evidence screenshot preview */}
-                {bug.evidenceRefs && parseEvidenceRefs(bug.evidenceRefs).length > 0 && (
-                  <div className="mt-4 pt-4 border-t border-slate-800 flex flex-wrap items-center gap-3">
-                    <span className="text-xs font-semibold text-slate-400 flex items-center gap-1.5">
-                      <Camera className="w-3.5 h-3.5 text-indigo-400" />
-                      <span>Captured Evidence:</span>
-                    </span>
-                    {parseEvidenceRefs(bug.evidenceRefs).map((ref, idx) => (
-                      <button
-                        key={idx}
-                        onClick={() => {
-                          setImageError(false);
-                          setSelectedScreenshot(api.getArtifactUrl(run.id, ref));
-                        }}
-                        className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-400 hover:text-indigo-300 bg-indigo-600/10 hover:bg-indigo-600/20 px-3 py-1.5 rounded-lg border border-indigo-500/20 transition-colors"
-                      >
-                        <Maximize2 className="w-3.5 h-3.5" />
-                        <span>View Failure Screenshot ({ref})</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {bug.consoleErrors && (
-                  <div className="mt-3 bg-black/40 rounded-xl p-3 border border-slate-800/80 font-mono text-[11px] text-amber-300">
-                    <span className="text-slate-500 block text-[10px] uppercase font-bold mb-1">
-                      Console Error Log:
-                    </span>
-                    <code>{bug.consoleErrors}</code>
-                  </div>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -470,12 +530,7 @@ export const TestRunDetail: React.FC = () => {
                                 <td className="py-2.5 text-right pr-1">
                                   {st.screenshotPath ? (
                                     <button
-                                      onClick={() => {
-                                        setImageError(false);
-                                        setSelectedScreenshot(
-                                          api.getArtifactUrl(run.id, st.screenshotPath!)
-                                        );
-                                      }}
+                                      onClick={() => openScreenshot(api.getArtifactUrl(run.id, st.screenshotPath!))}
                                       className="inline-flex items-center gap-1 text-indigo-400 hover:text-indigo-300 hover:underline"
                                     >
                                       <Camera className="w-3 h-3" />
@@ -501,39 +556,45 @@ export const TestRunDetail: React.FC = () => {
 
       {/* Screenshot Preview Modal */}
       {selectedScreenshot && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="relative max-w-5xl w-full bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl">
-            <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-              <span className="text-sm font-bold text-white flex items-center gap-2">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
+          onClick={() => setSelectedScreenshot(null)}
+        >
+          <div
+            className="relative max-w-5xl w-full bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+              <span className="text-sm font-semibold text-white flex items-center gap-2">
                 <Camera className="w-4 h-4 text-indigo-400" />
-                <span>Playwright Screenshot Artifact</span>
+                <span>{stepLabel(selectedScreenshot)}</span>
               </span>
-              <button
-                onClick={() => {
-                  setSelectedScreenshot(null);
-                  setImageError(false);
-                }}
-                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-1">
+                <a
+                  href={selectedScreenshot}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+                  title="Open in new tab"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                </a>
+                <button
+                  onClick={() => setSelectedScreenshot(null)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
-            <div className="p-4 max-h-[80vh] min-h-[300px] overflow-auto flex flex-col items-center justify-center bg-black/50">
+            <div className="p-4 max-h-[80vh] min-h-[200px] overflow-auto flex flex-col items-center justify-center bg-black/50">
               {imageError ? (
                 <div className="text-center p-6 max-w-md">
-                  <AlertTriangle className="w-10 h-10 text-amber-400 mx-auto mb-3" />
-                  <h4 className="text-sm font-semibold text-white mb-1">Screenshot Artifact Unavailable</h4>
-                  <p className="text-xs text-slate-400 mb-4 leading-relaxed">
-                    The artifact image could not be loaded from backend storage. This happens if the test step completed without a graphical browser window or if the run failed before screenshots could be captured.
+                  <AlertTriangle className="w-8 h-8 text-amber-400 mx-auto mb-2" />
+                  <h4 className="text-sm font-semibold text-white">Screenshot not found</h4>
+                  <p className="text-xs text-slate-400 mt-1">
+                    This image is missing from storage. Re-run the test to capture it again.
                   </p>
-                  <a
-                    href={selectedScreenshot}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 underline font-mono"
-                  >
-                    Direct Artifact Link ({selectedScreenshot.split('/').pop()})
-                  </a>
                 </div>
               ) : (
                 <img

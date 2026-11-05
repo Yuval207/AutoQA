@@ -220,8 +220,13 @@ public class FeatureParserService {
     private ObjectNode parseAction(String actionText) {
         ObjectNode node = mapper.createObjectNode();
         String lower = actionText.toLowerCase();
+        Matcher apiMatcher = Pattern.compile("(?i)^(?:send|request|call)\\s+(GET|POST|PUT|PATCH|DELETE)\\s+(\\S+)").matcher(actionText.trim());
 
-        if (lower.startsWith("open ") || lower.startsWith("navigate to ") || lower.startsWith("go to ")) {
+        if (apiMatcher.find()) {
+            node.put("type", "API_REQUEST");
+            node.put("value", apiMatcher.group(1).toUpperCase());
+            node.put("target", apiMatcher.group(2));
+        } else if (lower.startsWith("open ") || lower.startsWith("navigate to ") || lower.startsWith("go to ")) {
             node.put("type", "NAVIGATE");
             String target = actionText.replaceFirst("(?i)(open|navigate to|go to)\\s+", "").trim();
             node.put("target", target);

@@ -1,6 +1,7 @@
 import { chromium, Browser } from 'playwright';
 import { spawn, ChildProcess } from 'child_process';
 import * as http from 'http';
+import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -120,9 +121,66 @@ async function waitForHealthCheck(
   return false;
 }
 
+function isPortInUse(port: number): Promise<boolean> {
+  const probe = (host: string) =>
+    new Promise<boolean>((resolve) => {
+      const socket = net.connect({ port, host });
+      socket.setTimeout(1000);
+      socket.once('connect', () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once('timeout', () => {
+        socket.destroy();
+        resolve(false);
+      });
+      socket.once('error', () => resolve(false));
+    });
+  return Promise.all([probe('127.0.0.1'), probe('::1')]).then((r) => r.some(Boolean));
+}
+
+function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on('error', reject);
+    srv.listen(0, () => {
+      const { port } = srv.address() as net.AddressInfo;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+function isViteProject(dir: string): boolean {
+  if (['vite.config.ts', 'vite.config.js', 'vite.config.mjs', 'vite.config.mts'].some((f) => fs.existsSync(path.join(dir, f)))) {
+    return true;
+  }
+  try {
+    return fs.readFileSync(path.join(dir, 'package.json'), 'utf8').includes('"vite"');
+  } catch {
+    return false;
+  }
+}
+
+// Vite ignores PORT and silently shifts to another port when busy, so pin it explicitly
+function pinVitePort(command: string, cwd: string, port: number): string {
+  const addFlags = (cmd: string) =>
+    /--port\b/.test(cmd) ? cmd : cmd.replace(/npm run dev(\s+--(?=\s|$))?/, `npm run dev -- --port ${port} --strictPort`);
+
+  if (/\(\s*cd\s/.test(command)) {
+    return command.replace(
+      /\(\s*cd\s+("[^"]+"|[^\s&()]+)\s*&&\s*([^()]*?)\s*\)/g,
+      (m, dir, rest) => (isViteProject(path.resolve(cwd, dir.replace(/"/g, ''))) ? `(cd ${dir} && ${addFlags(rest)})` : m)
+    );
+  }
+  return isViteProject(cwd) ? addFlags(command) : command;
+}
+
 // cmd.exe parentheses don't scope `cd`, so "(cd a && x) && (cd b && y)" breaks on Windows
 function toPlatformCommand(command: string): string {
   if (process.platform !== 'win32') return command;
+  // cmd.exe doesn't support POSIX inline env assignments like "PORT=4000 npm start"
+  command = command.replace(/(^|&&\s*|\(\s*)([A-Za-z_][A-Za-z0-9_]*)=(\S+)\s+/g, (_m, pre, key, val) => `${pre}set "${key}=${val}" && `);
   return command.replace(
     /\(\s*cd\s+("[^"]+"|[^\s&()]+)\s*&&\s*([^()]*?)\s*\)/g,
     (_m, dir, rest) => `(pushd ${dir} && ${rest} && popd)`
@@ -161,7 +219,7 @@ function startApplication(
   startupCommand: string,
   cwd: string,
   envVars: Record<string, string>
-): { process: ChildProcess; getLog: () => string; isAlive: () => boolean } {
+): { processes: ChildProcess[]; getLog: () => string; isAlive: () => boolean } {
   let logBuffer = '';
 
   let effectiveCommand = startupCommand;
@@ -222,9 +280,10 @@ function startApplication(
     path.resolve(__dirname, 'compat.cjs'),
     path.resolve(__dirname, '../compat.cjs')
   ];
-  const compatPath = candidateCompats.find((p) => fs.existsSync(p));
+  const compatPath = candidateCompats.find((p) => fs.existsSync(p))?.replace(/\\/g, '/');
   let nodeOptions = process.env.NODE_OPTIONS || '';
   if (compatPath && !nodeOptions.includes(compatPath)) {
+    // NODE_OPTIONS treats backslashes as escapes, so forward slashes are required on Windows
     nodeOptions = `${nodeOptions} -r "${compatPath}"`.trim();
     console.log(`[Worker] Preloading compatibility polyfill: ${compatPath}`);
   }
@@ -234,41 +293,7 @@ function startApplication(
     fs.appendFileSync(appLogPath, startBanner);
   } catch {}
 
-  const child = spawn(toPlatformCommand(effectiveCommand), {
-    cwd,
-    shell: true,
-    detached: process.platform !== 'win32',
-    env: {
-      ...process.env,
-      ...envVars,
-      CI: 'true',
-      BROWSER: 'none',
-      PORT: envVars.PORT || '3000',
-      NODE_OPTIONS: nodeOptions,
-    },
-  });
-
-  let processExited = false;
-  child.on('exit', (code, signal) => {
-    processExited = true;
-    const text = `\n[Process Exited] code=${code}, signal=${signal}\n`;
-    logBuffer += text;
-    try {
-      fs.appendFileSync(appLogPath, text);
-    } catch {}
-  });
-
-  child.on('error', (err) => {
-    const text = `\n[Process Error] ${err.message}\n`;
-    logBuffer += text;
-    console.error(`[Worker] App process error: ${err.message}`);
-    try {
-      fs.appendFileSync(appLogPath, text);
-    } catch {}
-  });
-
-  child.stdout?.on('data', (data) => {
-    const text = data.toString();
+  const appendLog = (text: string) => {
     logBuffer += text;
     if (logBuffer.length > 50000) {
       logBuffer = logBuffer.substring(logBuffer.length - 50000);
@@ -276,30 +301,80 @@ function startApplication(
     try {
       fs.appendFileSync(appLogPath, text);
     } catch {}
-  });
+  };
 
-  child.stderr?.on('data', (data) => {
-    const text = data.toString();
-    logBuffer += text;
-    if (logBuffer.length > 50000) {
-      logBuffer = logBuffer.substring(logBuffer.length - 50000);
-    }
-    try {
-      fs.appendFileSync(appLogPath, text);
-    } catch {}
+  // cmd.exe runs "a & b" sequentially, so long-running services must be spawned separately
+  const parts = process.platform === 'win32' ? splitTopLevelAmpersand(effectiveCommand) : [effectiveCommand];
+  let running = parts.length;
+
+  const children = parts.map((part) => {
+    const child = spawn(toPlatformCommand(part), {
+      cwd,
+      shell: true,
+      detached: process.platform !== 'win32',
+      env: {
+        ...process.env,
+        ...envVars,
+        CI: 'true',
+        BROWSER: 'none',
+        PORT: envVars.PORT || '3000',
+        NODE_OPTIONS: nodeOptions,
+      },
+    });
+
+    child.on('exit', (code, signal) => {
+      running--;
+      appendLog(`\n[Process Exited] (${part}) code=${code}, signal=${signal}\n`);
+    });
+
+    child.on('error', (err) => {
+      console.error(`[Worker] App process error: ${err.message}`);
+      appendLog(`\n[Process Error] ${err.message}\n`);
+    });
+
+    child.stdout?.on('data', (data) => appendLog(data.toString()));
+    child.stderr?.on('data', (data) => appendLog(data.toString()));
+    return child;
   });
 
   return {
-    process: child,
+    processes: children,
     getLog: () => logBuffer,
-    isAlive: () => !processExited,
+    isAlive: () => running > 0,
   };
+}
+
+function splitTopLevelAmpersand(command: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let inQuote = false;
+  let current = '';
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === '"') inQuote = !inQuote;
+    else if (!inQuote && ch === '(') depth++;
+    else if (!inQuote && ch === ')') depth--;
+    if (!inQuote && depth === 0 && ch === '&' && command[i - 1] !== '&' && command[i + 1] !== '&') {
+      parts.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current.trim());
+  return parts.filter(Boolean);
 }
 
 function killProcess(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => {
-    if (!child || child.killed) {
+    if (!child || child.exitCode !== null || !child.pid) {
       resolve();
+      return;
+    }
+
+    // shell:true on Windows wraps the app in cmd.exe; kill the whole tree so ports are released
+    if (process.platform === 'win32') {
+      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F']).on('close', () => resolve()).on('error', () => resolve());
       return;
     }
 
@@ -333,9 +408,46 @@ function killProcess(child: ChildProcess): Promise<void> {
   });
 }
 
+function hasFreshNodeModules(dir: string): boolean {
+  const modules = path.join(dir, 'node_modules');
+  const pkg = path.join(dir, 'package.json');
+  if (!fs.existsSync(modules) || !fs.existsSync(pkg)) return false;
+  // npm writes this marker on every successful install; reinstall only if package.json changed since
+  const marker = path.join(modules, '.package-lock.json');
+  if (!fs.existsSync(marker)) return false;
+  return fs.statSync(marker).mtimeMs >= fs.statSync(pkg).mtimeMs;
+}
+
+// Drops npm install segments whose dependencies are already installed, and adds faster npm flags
+function optimizeInstallCommand(command: string, cwd: string): string | null {
+  const fastNpm = (cmd: string) =>
+    cmd.replace(/\bnpm (install|i)\b(?![^&)]*--no-audit)/g, 'npm install --no-audit --no-fund --prefer-offline');
+
+  const segmentRe = /\(\s*cd\s+("[^"]+"|[^\s&()]+)\s*&&\s*([^()]*?)\s*\)/g;
+  const onlySegments = command.replace(segmentRe, '').replace(/&&/g, '').trim() === '';
+  if (onlySegments) {
+    const kept: string[] = [];
+    for (const m of command.matchAll(segmentRe)) {
+      const dir = path.resolve(cwd, m[1].replace(/"/g, ''));
+      if (/\bnpm (install|i|ci)\b/.test(m[2]) && hasFreshNodeModules(dir)) {
+        console.log(`[Worker] Dependencies already installed in '${m[1]}', skipping install`);
+        continue;
+      }
+      kept.push(fastNpm(m[0]));
+    }
+    return kept.length > 0 ? kept.join(' && ') : null;
+  }
+
+  if (/^\s*npm (install|i|ci)\b/.test(command) && hasFreshNodeModules(cwd)) {
+    console.log('[Worker] Dependencies already installed, skipping install');
+    return null;
+  }
+  return fastNpm(command);
+}
+
 async function processJob(job: WorkerJob): Promise<void> {
   console.log(`[Worker] Starting job for run ${job.runId}`);
-  let appProcess: ChildProcess | null = null;
+  let appProcesses: ChildProcess[] = [];
   let getStartupLog = () => '';
   let browser: Browser | null = null;
 
@@ -419,6 +531,10 @@ async function processJob(job: WorkerJob): Promise<void> {
     }
 
     if (installCmd) {
+      installCmd = optimizeInstallCommand(installCmd, workDir);
+    }
+
+    if (installCmd) {
       const isCompound = installCmd.includes('&&') || installCmd.includes('(') || installCmd.includes('cd ') || installCmd.includes('--prefix');
       if (!isCompound && installCmd.startsWith('npm') && !fs.existsSync(path.resolve(workDir, 'package.json'))) {
         console.log(`[Worker] Skipping simple '${installCmd}' because no root package.json found in ${workDir}`);
@@ -440,12 +556,19 @@ async function processJob(job: WorkerJob): Promise<void> {
     }
 
     // 2. Start application if startupCommand is provided
-    let appUrl = `http://localhost:${job.port}`;
+    let appPort = job.port;
+    if (job.startupCommand && (await isPortInUse(appPort))) {
+      const freePort = await getFreePort();
+      console.warn(`[Worker] Port ${appPort} is already in use by another process (e.g. AutoQA itself). Running app under test on port ${freePort} instead.`);
+      appPort = freePort;
+    }
+    let appUrl = `http://localhost:${appPort}`;
     if (job.startupCommand) {
-      console.log(`[Worker] Starting application with command: ${job.startupCommand}`);
+      const startupCommand = pinVitePort(job.startupCommand, workDir, appPort);
+      console.log(`[Worker] Starting application with command: ${startupCommand}`);
       await updateRunStatus(job.runId, 'STARTING_ENVIRONMENT', undefined, 'Starting application server...');
 
-      let envVars: Record<string, string> = { PORT: String(job.port) };
+      let envVars: Record<string, string> = { PORT: String(appPort) };
       if (job.environmentVariables) {
         try {
           envVars = { ...envVars, ...JSON.parse(job.environmentVariables) };
@@ -453,9 +576,10 @@ async function processJob(job: WorkerJob): Promise<void> {
           // Ignored
         }
       }
+      if (appPort !== job.port) envVars.PORT = String(appPort);
 
-      const started = startApplication(job.startupCommand, workDir, envVars);
-      appProcess = started.process;
+      const started = startApplication(startupCommand, workDir, envVars);
+      appProcesses = started.processes;
       getStartupLog = started.getLog;
 
       // 3. Health check
@@ -480,6 +604,13 @@ async function processJob(job: WorkerJob): Promise<void> {
     await updateRunStatus(job.runId, 'RUNNING_TESTS');
     console.log(`[Worker] Application ready at ${appUrl}. Launching Playwright browser...`);
 
+    // Fullstack profiles start the backend with an inline PORT=xxxx; API scenarios must hit that, not the UI
+    const backendPortMatch = job.startupCommand?.match(/\bPORT=(\d+)/);
+    const apiBaseUrl = backendPortMatch && Number(backendPortMatch[1]) !== appPort
+      ? `http://localhost:${backendPortMatch[1]}`
+      : appUrl;
+    console.log(`[Worker] API requests will target ${apiBaseUrl}`);
+
     // 4. Launch browser
     browser = await chromium.launch({
       headless: true,
@@ -500,7 +631,7 @@ async function processJob(job: WorkerJob): Promise<void> {
       });
       const page = await context.newPage();
 
-      const executor = new ActionExecutor(page, appUrl, job.artifactsPath, job.runId);
+      const executor = new ActionExecutor(page, appUrl, job.artifactsPath, job.runId, apiBaseUrl);
       const stepResults: StepResult[] = [];
       let testPassed = true;
       let failureErrorMessage: string | null = null;
@@ -513,6 +644,14 @@ async function processJob(job: WorkerJob): Promise<void> {
         actions = JSON.parse(testCase.actions);
       } catch {
         actions = [];
+      }
+
+      // Older generated plans encode backend endpoints as browser navigation; run them as real HTTP calls
+      let expectedOutcomesJson = testCase.expectedOutcomes;
+      const endpointMatch = testCase.scenarioName.match(/^Verify (GET|POST|PUT|PATCH|DELETE) (\S+) endpoint$/i);
+      if (endpointMatch && !actions.some((a) => a.type === 'API_REQUEST')) {
+        actions = [{ type: 'API_REQUEST', value: endpointMatch[1].toUpperCase(), target: endpointMatch[2] }];
+        expectedOutcomesJson = JSON.stringify([{ description: 'status < 500', source: 'AI_INFERRED' }]);
       }
 
       // Execute steps
@@ -534,10 +673,10 @@ async function processJob(job: WorkerJob): Promise<void> {
       }
 
       // Execute assertions if all action steps succeeded
-      if (testPassed && testCase.expectedOutcomes) {
+      if (testPassed && expectedOutcomesJson) {
         let expectedOutcomes: Array<{ description: string; source: string }> = [];
         try {
-          expectedOutcomes = JSON.parse(testCase.expectedOutcomes);
+          expectedOutcomes = JSON.parse(expectedOutcomesJson);
         } catch {
           expectedOutcomes = [];
         }
@@ -590,25 +729,35 @@ async function processJob(job: WorkerJob): Promise<void> {
         const consoleLogs = executor.getConsoleLogs();
         const networkErrors = executor.getNetworkErrors();
 
+        const isApi = failedAction.type === 'API_REQUEST';
+        const failedStep = stepResults.find((s) => s.stepIndex === failedStepIndex);
         const bugFinding: BugFinding = {
           executionId: testCase.executionId,
-          title: `Failure in ${testCase.scenarioName}: ${failedAction.type} failed`,
+          title: isApi
+            ? `${failedAction.value} ${failedAction.target} returned a server error`
+            : `Failure in ${testCase.scenarioName}: ${failedAction.type} failed`,
           description: failureErrorMessage || `Step ${failedStepIndex} (${failedAction.type}) failed during execution`,
           severity: failedAction.type === 'NAVIGATE' ? 'CRITICAL' : 'HIGH',
-          category: failedAction.type.startsWith('ASSERT') ? 'FUNCTIONAL_REGRESSION' : 'UI_INTERACTION',
+          category: isApi ? 'API_ERROR' : failedAction.type.startsWith('ASSERT') ? 'FUNCTIONAL_REGRESSION' : 'UI_INTERACTION',
           featureName: testCase.featureName,
           scenarioName: testCase.scenarioName,
           failedStep: `Step ${failedStepIndex}: ${failedAction.type} on "${failedAction.target || ''}"`,
-          expectedBehaviour: failedAction.value || failedAction.description || 'Action should succeed and assertions should pass',
-          actualBehaviour: failureErrorMessage || 'Step failed or timed out',
+          expectedBehaviour: failedStep?.expectedValue || failedAction.value || failedAction.description || 'Action should succeed and assertions should pass',
+          actualBehaviour: failedStep?.actualValue || failureErrorMessage || 'Step failed or timed out',
           reproductionSteps: actions
             .slice(0, failedStepIndex)
-            .map((a, idx) => `${idx + 1}. ${a.type} ${a.target || ''} ${a.value ? `"${a.value}"` : ''}`.trim())
+            .map((a, idx) =>
+              a.type === 'API_REQUEST'
+                ? `${idx + 1}. ${a.value} ${apiBaseUrl}${a.target}`
+                : `${idx + 1}. ${a.type} ${a.target || ''} ${a.value ? `"${a.value}"` : ''}`.trim()
+            )
             .join('\n'),
           evidenceRefs: `${testCase.executionId}_step_${failedStepIndex}.png`,
-          consoleErrors: consoleLogs.length > 0 ? JSON.stringify(consoleLogs) : null,
+          consoleErrors: !isApi && consoleLogs.length > 0 ? JSON.stringify(consoleLogs) : null,
           networkErrors: networkErrors.length > 0 ? JSON.stringify(networkErrors) : null,
-          rootCauseHypothesis: failureErrorMessage?.includes('Timeout')
+          rootCauseHypothesis: isApi
+            ? 'Backend handler threw an unhandled error or the server is unreachable'
+            : failureErrorMessage?.includes('Timeout')
             ? 'Element not found or page took longer than expected to render'
             : 'Assertion value did not match expected application state',
           groupKey: `${testCase.featureName}:${failedAction.type}:${failedAction.target || ''}`,
@@ -634,9 +783,9 @@ async function processJob(job: WorkerJob): Promise<void> {
     if (browser) {
       await browser.close().catch(() => {});
     }
-    if (appProcess) {
+    if (appProcesses.length > 0) {
       console.log('[Worker] Stopping application process...');
-      await killProcess(appProcess);
+      await Promise.all(appProcesses.map(killProcess));
     }
   }
 }

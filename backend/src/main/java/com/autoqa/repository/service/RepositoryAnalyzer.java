@@ -303,12 +303,8 @@ public class RepositoryAnalyzer {
             sb.append("# Feature: ").append(formatTitle(projectName)).append(" Endpoints\n\n");
             for (DetectedEndpoint ep : endpoints) {
                 sb.append("## Scenario: ").append(ep.scenarioTitle).append("\n");
-                sb.append("- Open ").append(ep.path).append("\n");
-                if (ep.expectedText != null && !ep.expectedText.isBlank()) {
-                    sb.append("- Expected: ").append(ep.expectedText).append("\n");
-                } else {
-                    sb.append("- Expected: 200\n");
-                }
+                sb.append("- Send ").append(ep.method).append(" ").append(ep.path).append("\n");
+                sb.append("- Expected: status < 500\n");
                 sb.append("\n");
             }
         }
